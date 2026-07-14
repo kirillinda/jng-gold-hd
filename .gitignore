@@ -1,0 +1,21 @@
+# Python
+tools/venv/
+**/__pycache__/
+*.pyc
+
+# Downloaded upscaler binary + models (fetched by build.sh)
+tools/upscaler/
+# Debug-only 32-bit library shim (developer machine specific)
+tools/lib32shim/
+
+# Regenerable upscale cache (large) and build scratch/outputs
+upscaled/
+build/
+dist/
+
+# Never commit the game's proprietary binary / archives / art.
+# Users generate assets/ from their own copy of the game (build.sh runs extract.py).
+jng_gold
+jng_gold.orig
+*.dat
+assets/
