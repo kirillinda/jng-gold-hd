@@ -1,2 +1,6 @@
 Pillow>=10
 numpy>=1.24
+# LZO1X (de)compression for the game's .dat archives. Prebuilt wheels for
+# Windows/macOS/Linux, so no system liblzo2 or C toolchain is needed. On Linux
+# jngdat.py falls back to a system liblzo2 via ctypes if this is unavailable.
+lzallright>=0.2.6

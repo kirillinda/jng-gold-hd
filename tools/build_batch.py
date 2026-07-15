@@ -19,6 +19,7 @@ E = config.ASSETS
 RE = config.UPSCALER
 MODELS = config.MODELS_DIR
 MODEL = config.MODEL
+GPU = os.environ.get("JNG_GPU", "0")   # Vulkan device id (realesrgan -g); see build script
 CACHE = config.CACHE_DIR
 BIN = os.path.join(config.BUILD_DIR, "batch_in"); BOUT = os.path.join(config.BUILD_DIR, "batch_out")
 LOGICAL = config.LOGICAL; SCALE = config.SCALE
@@ -32,7 +33,7 @@ def is_fullscreen(rel, size):
 def enc(img, fmt):
     b = io.BytesIO()
     if fmt == "JPEG": img.save(b, "JPEG", quality=94, subsampling=1)
-    elif fmt == "PNG": img.save(b, "PNG")
+    elif fmt == "TGA": img.save(b, "TGA")   # uncompressed 32-bit, like the game's own .tga
     else: img.save(b, "BMP")
     return b.getvalue()
 
@@ -85,7 +86,7 @@ def main():
 
     if meta:
         t = time.time()
-        subprocess.run([RE, "-i", BIN, "-o", BOUT, "-n", MODEL, "-s", "4", "-g", "0", "-m", MODELS],
+        subprocess.run([RE, "-i", BIN, "-o", BOUT, "-n", MODEL, "-s", "4", "-g", GPU, "-m", MODELS],
                        check=True)
         print(f"GPU batch {len(meta)} imgs in {time.time()-t:.0f}s; postprocessing...", flush=True)
 
@@ -99,7 +100,7 @@ def main():
             rgb[arr[..., 3] < 128] = MAGENTA
             data = enc(Image.fromarray(rgb, "RGB"), "BMP")
         elif kind == "gray": data = enc(up.convert("L"), "BMP")
-        elif kind == "rgba": data = enc(up.convert("RGBA"), "PNG")
+        elif kind == "rgba": data = enc(up.convert("RGBA"), "TGA")
         else: data = enc(up.convert("RGB"), "JPEG" if fmt0 == "JPEG" else "BMP")
         cp = os.path.join(CACHE, rel); os.makedirs(os.path.dirname(cp), exist_ok=True)
         open(cp, "wb").write(data); files[rel] = data

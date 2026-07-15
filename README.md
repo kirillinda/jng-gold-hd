@@ -1,6 +1,6 @@
 # Jets'n'Guns Gold — HD + Widescreen Mod
 
-A mod for the **Linux Steam build of Jets'n'Guns Gold (v1.308 ST)** that:
+A mod for the **Steam build of Jets'n'Guns Gold (v1.308 ST)** — **Linux and Windows** — that:
 
 - adds **true 16:9 widescreen** (Hor+ — you see more to the sides, HUD stays correct), and
 - renders every sprite, texture and effect from **4× AI-upscaled art** at the correct
@@ -16,34 +16,104 @@ It is delivered as a **non-destructive overlay** plus a tiny binary patch — th
 
 ---
 
-## Quick start
+## Prerequisites
 
-```bash
-git clone <this-repo> jng-gold-hd && cd jng-gold-hd
-./build.sh                 # downloads the upscaler + default model, builds everything
+You don't need to be a programmer to build this — the script does the work — but a few free
+tools have to be present first. You need **three** things (plus a GPU driver you almost
+certainly already have):
+
+1. **Jets'n'Guns Gold**, installed from Steam. (You must own it.)
+2. **Python 3.10 or newer** — the language the build tool is written in.
+3. **Git** — to download this repo. *(Optional: you can instead click the green **Code ▸
+   Download ZIP** button on the repo page and unzip it, and skip Git entirely.)*
+
+Your GPU needs a normal, up-to-date graphics driver (that's all "Vulkan" requires — no extra
+downloads). Any AMD/NVIDIA/Intel card from the last decade works.
+
+### Install the tools
+
+**Windows** — open **PowerShell** (press Start, type "PowerShell", hit Enter) and paste:
+
+```powershell
+winget install Python.Python.3.12
+winget install Git.Git
 ```
 
-`build.sh` produces two folders under `dist/`:
+Then **close and reopen PowerShell** so it picks up the new commands.
+
+**Linux** — use your distro's package manager, e.g. on Debian/Ubuntu:
+
+```bash
+sudo apt install python3 python3-venv git curl unzip
+```
+
+---
+
+## Quick start
+
+### Windows
+
+In PowerShell, run these one at a time. Replace the path on the 3rd line with **your** game
+folder if the game isn't on your C: drive (a `D:\SteamLibrary` is common — in Steam, right-click
+the game ▸ *Manage* ▸ *Browse local files* to see where it is):
+
+```powershell
+git clone https://github.com/kirillinda/jng-gold-hd jng-gold-hd
+cd jng-gold-hd
+$env:JNG_GAME_DIR = "D:\SteamLibrary\steamapps\common\JnG Gold"
+powershell -ExecutionPolicy Bypass -File build.ps1
+```
+
+*(The `-ExecutionPolicy Bypass` part just lets Windows run the script this once; it doesn't
+change any system settings. If you downloaded the ZIP instead of using Git, skip the first line
+and `cd` into the unzipped folder.)*
+
+The first build takes a few minutes — it downloads the AI upscaler and model, unpacks your
+game's art, upscales ~1,900 images on your GPU, and packs everything.
+
+### Linux
+
+```bash
+git clone https://github.com/kirillinda/jng-gold-hd jng-gold-hd && cd jng-gold-hd
+./build.sh                        # downloads the upscaler + default model, builds everything
+```
+
+The build produces two folders under `dist/`:
 
 | Folder | What it is |
 | --- | --- |
-| `dist/mod-dropin/` | **Only the changed files** — `jng_gold`, `hd.dat`, `Data.ini`, `Game.cfg` + `install.sh`. Copy into your game folder for a drop-in install. |
+| `dist/mod-dropin/` | **Only the changed files** — the patched game binary, `hd.dat`, `Data.ini` + an installer. Copy into your game folder for a drop-in install. |
 | `dist/patched-game/` | A **complete, ready-to-run** copy of the patched game. |
 
 Install the drop-in:
 
+**Windows** — from `dist\mod-dropin\`, with the game closed:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -GameDir "D:\SteamLibrary\steamapps\common\JnG Gold"
+```
+
+`install.ps1` backs up the originals to `*.orig`, installs the patched files, and enables
+widescreen in your `Documents\JnGGold\Game.ini`. `uninstall.ps1` restores everything. Then
+launch the game from Steam as usual.
+
+**Linux** — from `dist/mod-dropin/`:
+
 ```bash
-cd dist/mod-dropin
 ./install.sh "$HOME/.local/share/Steam/steamapps/common/JnG Gold"
 ```
 
-`install.sh` backs up the originals to `*.orig`; `uninstall.sh` restores them. Then launch
-the game from Steam as usual.
+`install.sh` backs up the originals to `*.orig`; `uninstall.sh` restores them.
 
 ### Choosing the upscale model
 
+```powershell
+.\build.ps1                          # default: 4x_NMKD-Siax_200k (sharp, detailed)
+.\build.ps1 -Model realesrgan-x4plus # any model present in tools/upscaler/models/
+```
+
 ```bash
-./build.sh                      # default: 4x_NMKD-Siax_200k (sharp, detailed)
+./build.sh                      # default: 4x_NMKD-Siax_200k
 ./build.sh realesrgan-x4plus    # any model present in tools/upscaler/models/
 ```
 
@@ -55,28 +125,34 @@ model is downloaded automatically. Results are cached per-model, so switching is
 
 ---
 
-## Requirements
+## Requirements (reference)
 
-- The Linux Steam build of **Jets'n'Guns Gold 1.308 ST**.
-- A **Vulkan-capable GPU** (the upscaler is `realesrgan-ncnn-vulkan`; it runs on AMD/Intel/NVIDIA
-  with the system Vulkan driver — no CUDA/ROCm needed). Developed on an AMD RX 7900 XTX.
-- `python3`, `curl`, `unzip`, and a working Vulkan loader.
+The [Prerequisites](#prerequisites) section above has the step-by-step install. In short:
+
+- The Steam build of **Jets'n'Guns Gold 1.308 ST** (Linux or Windows).
+- **Python 3.10+** and (optionally) **Git**.
+- A **Vulkan-capable GPU** — any modern AMD/Intel/NVIDIA card with an up-to-date driver; no
+  CUDA/ROCm needed (the upscaler is `realesrgan-ncnn-vulkan`). Developed on an AMD RX 7900 XTX.
+
+Everything else (the Vulkan upscaler binary, the LZO codec, the Python image libraries) is
+fetched automatically into a local `tools/venv/` — no system packages to install by hand.
 
 ---
 
 ## Repository layout
 
 ```
-build.sh                 one-shot builder (see top of file for options)
+build.sh / build.ps1     one-shot builders (Linux / Windows; see top of file for options)
 tools/
-  config.py              paths / parameters (env-overridable)
+  config.py              paths / parameters (env-overridable; OS-aware defaults)
   jngdat.py              reader + writer for the game's LZO .dat archives
   extract.py             unpack the .dat archives into assets/
   upscale.py             the upscaling pipeline (transparency-aware)
   build_batch.py         upscale every asset 4x and pack build/hd.dat (GPU batch)
-  patch_hd.py            binary-patch the game so 4x textures draw at correct size
-  make_gamecfg.py        generate a widescreen Game.cfg
-  install.sh/uninstall.sh  drop-in (un)installer
+  patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
+  make_gamecfg.py        generate a widescreen Game.cfg (Linux)
+  install.sh / install.ps1      drop-in installer   (Linux / Windows)
+  uninstall.sh / uninstall.ps1  drop-in uninstaller (Linux / Windows)
 assets/                  the game's unpacked art (GENERATED from your own game copy;
                          git-ignored — never redistributed)
 docs/HOW_IT_WORKS.md     full technical write-up (engine internals + why the patch works)
@@ -90,11 +166,11 @@ the tooling and docs — you build everything from **your own** legally-owned co
 
 ## Editing the art yourself
 
-`build.sh` unpacks your game's art into `assets/DATA/...` on first run (or run
-`tools/venv/bin/python tools/extract.py` manually). Edit any `.bmp/.jpg/.tga` there (keep the
-magenta `255,0,255` background as the transparent key for sprites), then re-run `./build.sh`
-— only changed files are re-upscaled and repacked. `assets/` is git-ignored, so your edits
-stay local and the game's copyrighted art is never committed.
+The build unpacks your game's art into `assets/DATA/...` on first run (or run
+`tools/venv/.../python tools/extract.py` manually). Edit any `.bmp/.jpg/.tga` there (keep the
+magenta `255,0,255` background as the transparent key for sprites), then re-run the build —
+only changed files are re-upscaled and repacked. `assets/` is git-ignored, so your edits stay
+local and the game's copyrighted art is never committed.
 
 ---
 
@@ -102,18 +178,22 @@ stay local and the game's copyrighted art is never committed.
 
 1. **Widescreen** is a config change: the engine renders into a pixel-space
    `glOrtho(0, Width, Height, 0)`, so we set a 16:9 logical resolution at the native
-   600px height (`1067×600`). Gameplay and HUD reposition correctly.
+   600px height (`1067×600`). Gameplay and HUD reposition correctly. On Linux this goes in
+   the game-folder `Game.cfg`; on Windows it goes in `Documents\JnGGold\Game.ini` (`[VIDEO]`
+   `Width`/`Height`/`ratio43`) — the installer handles it.
 2. **The engine draws every texture 1:1** — one texture pixel = one logical unit — so a
    bigger texture would just draw bigger. The **binary patch** makes each loaded texture
    report its size as ¼ of the real (4×) pixels, so sprites keep their original size and
    position while sampling 4× the detail. This is a 4-instruction change in
-   `CRXTexture::Load`.
+   `CRXTexture::Load` and works on both the Windows (PE) and Linux (ELF) binaries. On Windows
+   the patch also sets the exe **Large-Address-Aware**, so the 32-bit process can use 4 GB
+   (HD art is 16× the pixels, and a level's textures exceed the default 2 GB ceiling).
 3. **The overlay** (`hd.dat`) is a valid game archive containing 4×-upscaled versions of
    every image; it's listed first in `Data.ini` so it overrides `jng.dat` (first match
    wins) without modifying the original.
 
-The full story — the `.dat` format, the color-key handling, and exactly why the ÷4 patch is
-mathematically correct — is in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
+The full story — the `.dat` format, the color-key handling, the platform differences, and
+exactly why the ÷4 patch is mathematically correct — is in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ---
 

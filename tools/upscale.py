@@ -90,7 +90,10 @@ def upscale_sprite(im: Image.Image, scale=4, model="realesrgan-x4plus-anime"):
     if kind == "gray":
         return _up4x(im.convert("RGB"), model, scale).convert("L"), "BMP"
     if kind == "rgba":
-        return _up4x(im.convert("RGBA"), model, scale).convert("RGBA"), "PNG"
+        # TGA (uncompressed 32-bit), matching the game's own .tga assets. The
+        # shipped Windows SDL2_image loads PNG via libpng, which isn't bundled,
+        # so a PNG here crashes the game; TGA uses its always-present TGA loader.
+        return _up4x(im.convert("RGBA"), model, scale).convert("RGBA"), "TGA"
     up = _up4x(im.convert("RGB"), model, scale)
     return up, "JPEG" if im.format == "JPEG" else "BMP"
 

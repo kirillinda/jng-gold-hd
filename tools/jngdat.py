@@ -23,45 +23,72 @@ word i = (seed + i*0x732C2E17). The original routine only obfuscates the
 first `len>>2` "units" of each buffer (a quirk of the shipped code); this is
 replicated exactly so round-trips are byte-identical.
 """
-import ctypes, ctypes.util, struct, zlib, os
+import struct, zlib, os
 
 KS_STEP = 0x732C2E17
 KEY_MUL = 0x17BC3
 MASK = 0xFFFFFFFF
 
-# ---- LZO via liblzo2 (no compilation, no pip dependency) -------------------
-_lzo = ctypes.CDLL(ctypes.util.find_library("lzo2") or "liblzo2.so.2")
-_lzo.lzo1x_decompress_safe.restype = ctypes.c_int
-_lzo.lzo1x_decompress_safe.argtypes = [
-    ctypes.c_char_p, ctypes.c_size_t,
-    ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p]
-# 1x-1 compressor (present in full liblzo2); wrkmem size for LZO1X-1
-_LZO1X_1_MEM = 16384 * ctypes.sizeof(ctypes.c_void_p)
-_has_compress = hasattr(_lzo, "lzo1x_1_compress")
-if _has_compress:
-    _lzo.lzo1x_1_compress.restype = ctypes.c_int
-    _lzo.lzo1x_1_compress.argtypes = [
+# ---- LZO1X ------------------------------------------------------------------
+# Two interchangeable back-ends, tried in order:
+#   1. lzallright — a pip wheel bundling miniLZO (LZO1X). It ships prebuilt
+#      wheels for Windows/macOS/Linux, so no system library or C toolchain is
+#      needed. This is the portable default and what the Windows build uses.
+#   2. ctypes -> system liblzo2 — the original zero-dependency Linux path, kept
+#      as a fallback for machines that have liblzo2 but not the wheel.
+# Both speak the same LZO1X bitstream the game's own decompressor reads.
+_LZO_BACKEND = None
+
+try:
+    import lzallright as _lzal          # cross-platform prebuilt wheel
+    _lzc = _lzal.LZOCompressor()
+    _LZO_BACKEND = "lzallright"
+
+    def lzo_decompress(src: bytes, out_len: int) -> bytes:
+        out = _lzal.LZOCompressor.decompress(bytes(src), output_size_hint=out_len)
+        if len(out) != out_len:
+            raise ValueError(f"lzo decompress len {len(out)} != {out_len}")
+        return bytes(out)
+
+    def lzo_compress(src: bytes) -> bytes:
+        return bytes(_lzc.compress(bytes(src)))
+
+except ImportError:
+    import ctypes, ctypes.util
+    _lib = ctypes.util.find_library("lzo2") or "liblzo2.so.2"
+    _lzo = ctypes.CDLL(_lib)
+    _LZO_BACKEND = f"liblzo2 ({_lib})"
+    _lzo.lzo1x_decompress_safe.restype = ctypes.c_int
+    _lzo.lzo1x_decompress_safe.argtypes = [
         ctypes.c_char_p, ctypes.c_size_t,
         ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p]
+    # 1x-1 compressor (present in full liblzo2); wrkmem size for LZO1X-1
+    _LZO1X_1_MEM = 16384 * ctypes.sizeof(ctypes.c_void_p)
+    _has_compress = hasattr(_lzo, "lzo1x_1_compress")
+    if _has_compress:
+        _lzo.lzo1x_1_compress.restype = ctypes.c_int
+        _lzo.lzo1x_1_compress.argtypes = [
+            ctypes.c_char_p, ctypes.c_size_t,
+            ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p]
 
-def lzo_decompress(src: bytes, out_len: int) -> bytes:
-    dst = ctypes.create_string_buffer(out_len)
-    dl = ctypes.c_size_t(out_len)
-    r = _lzo.lzo1x_decompress_safe(src, len(src), dst, ctypes.byref(dl), None)
-    if r != 0:
-        raise ValueError(f"lzo1x_decompress_safe rc={r}")
-    return dst.raw[:dl.value]
+    def lzo_decompress(src: bytes, out_len: int) -> bytes:
+        dst = ctypes.create_string_buffer(out_len)
+        dl = ctypes.c_size_t(out_len)
+        r = _lzo.lzo1x_decompress_safe(src, len(src), dst, ctypes.byref(dl), None)
+        if r != 0:
+            raise ValueError(f"lzo1x_decompress_safe rc={r}")
+        return dst.raw[:dl.value]
 
-def lzo_compress(src: bytes) -> bytes:
-    if not _has_compress:
-        raise RuntimeError("liblzo2 lacks lzo1x_1_compress")
-    dst = ctypes.create_string_buffer(len(src) + len(src)//16 + 64 + 3)
-    dl = ctypes.c_size_t(len(dst))
-    wrk = ctypes.create_string_buffer(_LZO1X_1_MEM)
-    r = _lzo.lzo1x_1_compress(src, len(src), dst, ctypes.byref(dl), wrk)
-    if r != 0:
-        raise ValueError(f"lzo1x_1_compress rc={r}")
-    return dst.raw[:dl.value]
+    def lzo_compress(src: bytes) -> bytes:
+        if not _has_compress:
+            raise RuntimeError("liblzo2 lacks lzo1x_1_compress")
+        dst = ctypes.create_string_buffer(len(src) + len(src)//16 + 64 + 3)
+        dl = ctypes.c_size_t(len(dst))
+        wrk = ctypes.create_string_buffer(_LZO1X_1_MEM)
+        r = _lzo.lzo1x_1_compress(src, len(src), dst, ctypes.byref(dl), wrk)
+        if r != 0:
+            raise ValueError(f"lzo1x_1_compress rc={r}")
+        return dst.raw[:dl.value]
 
 # ---- obfuscation -----------------------------------------------------------
 def xorbuf(buf: bytearray, seed: int):

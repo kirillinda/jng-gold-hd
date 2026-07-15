@@ -14,8 +14,10 @@ build/
 dist/
 
 # Never commit the game's proprietary binary / archives / art.
-# Users generate assets/ from their own copy of the game (build.sh runs extract.py).
+# Users generate assets/ from their own copy of the game (the builder runs extract.py).
 jng_gold
 jng_gold.orig
+jng_gold.exe
+jng_gold.exe.orig
 *.dat
 assets/

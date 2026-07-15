@@ -1,8 +1,10 @@
 # How it works
 
 A complete technical account of the mod: the engine internals that were reverse-engineered,
-the file formats, and exactly why each piece is correct. Everything here was derived from the
-shipped (unstripped) 32-bit `jng_gold` binary with `objdump`/`gdb`.
+the file formats, and exactly why each piece is correct. The bulk was derived from the shipped
+(unstripped) 32-bit Linux `jng_gold` binary with `objdump`/`gdb`; the Windows `jng_gold.exe`
+specifics (see [§9](#9-windows-vs-linux)) were confirmed with `capstone`/`pefile` and a small
+Win32 debugger. Both are the same 32-bit RX engine on SDL2 + OpenGL.
 
 ## Contents
 1. [The engine at a glance](#1-the-engine-at-a-glance)
@@ -13,6 +15,7 @@ shipped (unstripped) 32-bit `jng_gold` binary with `objdump`/`gdb`.
 6. [The binary patch](#6-the-binary-patch)
 7. [Transparency / color-key](#7-transparency--color-key)
 8. [The upscaling pipeline](#8-the-upscaling-pipeline)
+9. [Windows vs. Linux](#9-windows-vs-linux)
 
 ---
 
@@ -223,3 +226,41 @@ over a whole directory with the model loaded once and the GPU session reused. Th
 than invoking it per image (which re-initializes Vulkan and reloads the 64 MB model every time):
 ~200s for all ~1800 model-eligible images vs. ~40 min. Everything is cached per model under
 `upscaled/<model>/`, so changing models or editing a few assets only reprocesses what changed.
+
+---
+
+## 9. Windows vs. Linux
+
+The Windows and Linux Steam builds are the *same* game — Rake in Grass's RX engine on SDL2 +
+fixed-function **OpenGL** (the Windows build imports `OPENGL32`/`GLU32`, not Direct3D) — so the
+whole approach ports directly. Three things differ, and the tooling handles each automatically
+(`patch_hd.py` dispatches on the file magic; `config.py` picks OS-aware defaults).
+
+**The binary patch (PE vs. ELF).** `CRXTexture::Load` has the identical shape on the Windows
+`jng_gold.exe`, including the four dimension members at the same offsets (`+0xc/+0x10/+0x14/+0x18`)
+and a color-key loop bounded by the POT dims. Only the register assignment and addresses change:
+`this` is in **EBX** (not ESI), the injection point — the convergence of both Load success paths,
+right after keying — is **`0x408609`**, and the code cave is the `int3` padding at **`0x43ac43`**.
+The four instructions become `sar dword [ebx+off], 2`. Same math, same ÷4 invariant.
+
+**PNG is not safe on Windows.** SDL2_image loads PNG through libpng, which it opens *dynamically*;
+the shipped game bundles `libjpeg-9.dll` but **no `libpng16-16.dll`**. Handing this SDL2_image a
+PNG makes it call through a null libpng pointer and crash (observed as `EIP=0`, an execute fault
+at address 0). The Linux system SDL2_image has PNG, which hid this. So RGBA sprites are written as
+**uncompressed 32-bit TGA** — byte-identical to the game's own `.tga` art (image type 2, 32 bpp,
+descriptor `0x08`) and decoded by SDL2_image's always-present TGA path. `IMG_Load_RW` can't sniff
+TGA (it has no magic number), which is exactly why `Load` seeks back and calls `IMG_LoadTGA_RW`
+explicitly as a fallback — the path our TGAs take. **No image in `hd.dat` is a PNG.**
+
+**Large-Address-Aware.** HD art is 16× the pixels, so a level's textures need far more transient
+memory (the fog tiles alone are 4096×4096 = 64 MB surfaces). A 32-bit process gets a **3 GB** user
+address space on 32-bit Linux but only **2 GB** on 64-bit Windows unless the exe is flagged
+`IMAGE_FILE_LARGE_ADDRESS_AWARE` — so a level that fits on Linux exhausts the address space on
+Windows and `SDL_CreateRGBSurface` starts returning NULL ("Unable to load texture"). The PE patch
+sets that flag (one bit in the FILE_HEADER characteristics), lifting the ceiling to 4 GB. This is
+the standard large-texture-pack fix and is only applied to the Windows binary.
+
+**Widescreen config location.** The logical `Width`/`Height` (and `ratio43`) live in the
+game-folder `Game.cfg` on Linux, but in `Documents\JnGGold\Game.ini` under `[VIDEO]` on Windows,
+read via `GetPrivateProfileInt`. The game's config *writer* never emits `Width`/`Height`, so the
+values the installer adds persist across runs. `install.ps1` edits that file (and backs it up).
