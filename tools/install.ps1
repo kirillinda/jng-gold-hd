@@ -6,7 +6,7 @@ Run from your JnG Gold game folder (where jng_gold.exe lives), or pass its path:
 
 It:
   * backs up the stock jng_gold.exe / Data.ini to *.orig (once),
-  * installs the patched jng_gold.exe, hd.dat and an overlay-first Data.ini,
+  * installs the patched jng_gold.exe, hd.dat, ws.dat and an overlay-first Data.ini,
   * enables Hor+ widescreen (Width=1067, Height=600, ratio43=0) in your
     Documents\JnGGold\Game.ini, backing it up to Game.ini.orig first.
 
@@ -33,7 +33,7 @@ foreach ($f in @("jng_gold.exe", "Data.ini")) {
         Write-Host "backed up $f -> $f.orig"
     }
 }
-foreach ($f in @("jng_gold.exe", "hd.dat", "Data.ini")) {
+foreach ($f in @("jng_gold.exe", "hd.dat", "ws.dat", "Data.ini")) {
     Copy-Item (Join-Path $Here $f) (Join-Path $GameDir $f) -Force
     Write-Host "installed $f"
 }

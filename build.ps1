@@ -19,6 +19,7 @@ What it does (mirrors build.sh on Linux):
   3. resolves / downloads the upscale model
   4. unpacks the game's assets from YOUR copy (first run only)
   5. upscales every asset 4x and packs the HD override archive  (build\hd.dat)
+     and re-authors the 800-wide level defs for 16:9            (build\ws.dat)
   6. binary-patches the game executable                          (build\jng_gold.exe)
   7. assembles two deliverables under dist\:
        dist\mod-dropin\    only the changed files (+ install/uninstall scripts)
@@ -125,10 +126,16 @@ $Full   = Join-Path $Repo "dist\patched-game"
 Remove-Item -Recurse -Force $Dropin, $Full -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force $Dropin, $Full | Out-Null
 
-# Data.ini that loads the overlay first (first match wins).
-"data_file = hd.dat`r`ndata_file = update.dat`r`ndata_file = jng.dat`r`n" |
+# ws.dat: the level defs whose coordinates were authored for an 800-wide screen,
+# re-authored for the target Width. Pure data, so it applies on Windows too.
+Log "Building build\ws.dat (resolution-dependent defs)"
+& $Py (Join-Path $Repo "tools\make_widescreen_defs.py") (Join-Path $Repo "build\ws.dat")
+if (-not $?) { Die "ws.dat build failed" }
+
+# Data.ini that loads the overlays first (first match wins).
+"data_file = ws.dat`r`ndata_file = hd.dat`r`ndata_file = update.dat`r`ndata_file = jng.dat`r`n" |
     Out-File -FilePath (Join-Path $Dropin "Data.ini") -Encoding ascii -NoNewline
-Copy-Item $buildBin, (Join-Path $Repo "build\hd.dat") $Dropin
+Copy-Item $buildBin, (Join-Path $Repo "build\hd.dat"), (Join-Path $Repo "build\ws.dat") $Dropin
 Copy-Item (Join-Path $Repo "tools\install.ps1"), (Join-Path $Repo "tools\uninstall.ps1") $Dropin
 
 @"
@@ -145,7 +152,7 @@ your Documents\JnGGold\Game.ini. Uninstall with uninstall.ps1.
 Copy-Item -Recurse -Force (Join-Path $GameDir "*") $Full
 Get-ChildItem $Full -Filter "*.orig" | Remove-Item -Force -ErrorAction SilentlyContinue
 Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Full "hd_test.dat"), (Join-Path $Full "game.log")
-Copy-Item -Force $buildBin, (Join-Path $Repo "build\hd.dat"), (Join-Path $Dropin "Data.ini") $Full
+Copy-Item -Force $buildBin, (Join-Path $Repo "build\hd.dat"), (Join-Path $Repo "build\ws.dat"), (Join-Path $Dropin "Data.ini") $Full
 
 Log "Done."
 Write-Host "  dist\mod-dropin\    -> copy into your game folder, then run install.ps1"
