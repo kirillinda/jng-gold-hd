@@ -4,7 +4,7 @@ uninstall.ps1 - restore the stock game after the HD + widescreen mod (Windows).
 Run from your JnG Gold folder, or pass its path:
   powershell -ExecutionPolicy Bypass -File uninstall.ps1 ["C:\path\to\JnG Gold"]
 
-Restores the *.orig backups (jng_gold.exe, Data.ini), removes hd.dat, and
+Restores the *.orig backups (jng_gold.exe, Data.ini), removes hd.dat / ws.dat, and
 restores Documents\JnGGold\Game.ini from its .orig backup. Close the game first.
 #>
 [CmdletBinding()]
@@ -20,8 +20,10 @@ foreach ($f in @("jng_gold.exe", "Data.ini")) {
         Write-Host "restored $f"
     }
 }
-$hd = Join-Path $GameDir "hd.dat"
-if (Test-Path $hd) { Remove-Item $hd -Force; Write-Host "removed hd.dat" }
+foreach ($f in @("hd.dat", "ws.dat")) {
+    $p = Join-Path $GameDir $f
+    if (Test-Path $p) { Remove-Item $p -Force; Write-Host "removed $f" }
+}
 
 $ini = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "JnGGold\Game.ini"
 if (Test-Path "$ini.orig") {

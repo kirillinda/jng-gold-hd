@@ -10,7 +10,7 @@ Win32 debugger. Both are the same 32-bit RX engine on SDL2 + OpenGL.
 1. [The engine at a glance](#1-the-engine-at-a-glance)
 2. [The `.dat` archive format](#2-the-dat-archive-format)
 3. [The override overlay](#3-the-override-overlay)
-4. [Widescreen](#4-widescreen)
+4. [Widescreen](#4-widescreen) — incl. [4a. 4:3 assumptions in the *code*](#4a-the-43-assumptions-the-config-change-does-not-fix) and [4b. in the *data*](#4b-the-43-assumptions-that-live-in-the-games-data)
 5. [Why HD needs a binary patch](#5-why-hd-needs-a-binary-patch)
 6. [The binary patch](#6-the-binary-patch)
 7. [Transparency / color-key](#7-transparency--color-key)
@@ -122,6 +122,125 @@ any size; the viewport scales `1067×600` onto it. See [`tools/make_gamecfg.py`]
 
 (Ultrawide 21:9 would be `Width ≈ 1433`; only the full-screen UI images would need
 regenerating at that aspect. Not currently shipped.)
+
+### 4a. The 4:3 assumptions the config change does *not* fix
+
+Setting `Width` is necessary but **not sufficient**: a handful of gameplay sites ignore
+`g_Screen` and hardcode the 800×600 the game shipped with. Most of the engine is well
+behaved — shot culling (`CShot::Update`), enemy despawn (`CEnemy::Update`), the vertical
+kill plane (`CEnemy::UpdateVelocity`), the tilemap visibility rect
+(`CRXTileMap::CalculateVisibilityRect`) and the enemy spawn trigger (`ParseNextStarter`)
+all read `g_Screen->Width`/`->Height` properly. Five sites do not.
+
+The one that actually breaks the game is in **`CEnemy::Update`**. Enemies are driven by
+behavior scripts through numbered events; the parser in `ReadBehaviorEntry` maps the `.txt`
+names to ids (`on_screen_left` = 0x1f, `on_screen_right` = 0x20). `CEnemy::Update` fires
+them from the sprite's x:
+
+```c
+if (spr->x < 0)                                 ParseBehaviorEvent(on_screen_left);
+else if (spr->x > (type ? 800 - type->w : 800)) ParseBehaviorEvent(on_screen_right);
+//                       ^^^ hardcoded, should be g_Screen->Width
+```
+
+`on_screen_left` is fine — 0 is the left edge at any width. `on_screen_right` is not.
+`ParseNextStarter` correctly spawns each enemy at the true right edge (it fires when
+`scrollX + g_Screen->Width >= starter->x`, so the enemy appears at `x ≈ Width`). On a
+1067-wide screen **every enemy is therefore born already past the stale 800 bound and fires
+`on_screen_right` on its very first frame**. Measured live under gdb with `type->w = 120`:
+vanilla fires at `x > 680`, fixed fires at `x > 947`.
+
+That event means "you reached the right edge, turn back / leave", so the damage is
+data-driven and shows up as sprites dying for no reason:
+
+| def | `<on_screen_right>` does | effect at 1067 wide |
+| --- | --- | --- |
+| `air.torpedo/*_b.txt` | `behavior = torp_exit` | torpedoes fade out on spawn — vanish long before crossing |
+| `special.tanker/tanker_b.txt` | `trigger.TANKER_FAILED` | escort mission fails the instant the tanker appears |
+| `man/behavior_man.txt`, `special.ogre`, `man.mutant` | `Behavior = MAN_WALK_LEFT` / `OGRE_TURN_L` / `M_TURN_L` | walkers turn back at ~75% across, at an invisible wall |
+
+The other sites are less dramatic: **`GetNearestEnemy`** (homing / auto-aim target
+selection) only considers enemies inside a hardcoded 800×600 box, so nothing in the extra
+width is targetable; and **`CEnemyPart::ParseCollisions`** saves the `CHECK_POINT` respawn
+scroll position as `worldX - 800` instead of `worldX - Width`.
+
+Careful: 800.0f/600.0f/400.0f appear in plenty of *other* places as **speeds** (multiplied
+by the frame delta) or as a terminal-velocity clamp — `CEnemy::UpdateAsWreck`,
+`CAtarix::Update`, `CHero::UpdateWingLine`, `CScoreNumber::Update`. Those are not screen
+bounds and must be left alone. The 800.0f at `.rodata:0x80cf144` is *shared* between real
+screen bounds and physics constants, which is why the constant itself can't just be
+edited — each site is patched individually.
+
+[`tools/patch_widescreen.py`](../tools/patch_widescreen.py) fixes all five, reading
+`g_Screen->Width`/`->Height` at **runtime** (through `ebx`, which GCC pins to the GOT base
+`0x80e08f0` in every function here), so no resolution is baked into the binary and any
+`Width` in `Game.cfg` stays correct. Four sites are rewritten in place — the replacement is
+exactly the size of the original straight-line region, and no branch enters those regions
+from outside; the fifth needs 19 bytes it can't borrow, so it calls a small routine placed
+in unreferenced `.rodata` alignment padding (`.rodata` is mapped `R E` here). It composes
+with `patch_hd.py`, which uses a different cave. **Linux ELF only** — the Windows PE is
+stripped and needs its own address survey.
+
+### 4b. The 4:3 assumptions that live in the game's *data*
+
+Fixing the engine isn't enough either: the title screen is built out of level defs, and
+every level's ambient particle field declares a spawn rectangle — all in a coordinate space
+where the screen is 800 wide. [`tools/make_widescreen_defs.py`](../tools/make_widescreen_defs.py)
+re-authors them for the target `Width` and ships them as a tiny separate overlay
+(`ws.dat`, ~100KB) listed before `hd.dat`. Keeping them out of the 1.2GB art archive means
+changing resolution is a one-second rebuild instead of re-upscaling 1930 images.
+
+Coordinates come in three flavours, and using the wrong transform on the wrong one breaks
+things, so each is handled explicitly:
+
+| flavour | transform | why |
+| --- | --- | --- |
+| absolute, centred composition | `x += (W-800)/2` | the logo, the ESC prompt |
+| absolute, right-edge anchored | `x += (W-800)` | the right-hand credits panel, particle spawn strips |
+| absolute, left-edge anchored | unchanged | the left-hand credits panel |
+| spawn offset relative to the right edge, but really measuring off the **left** edge | `x -= (W-800)` | the logo's left half |
+| `pos = -1` | unchanged | engine sentinel — it centres those itself |
+
+The five data bugs, all measured on a 1067×600 logical screen:
+
+1. **Logo off-centre.** The logo is two sprites (`jng_l1`/`jng_r1`, 120px each) whose paths
+   end on absolute x=300/420 — straddling 800/2. Fix `+133` → 433/553 (verified in memory:
+   both halves rest at exactly 433.00/553.00). *Not* proportional scaling (`x *= W/800` →
+   400/560): that pulls the halves 40px apart and tears the logo in half — the gap between
+   them is a sprite width, not a screen fraction.
+
+2. **Logo halves arrived at different times.** Both spawn relative to the right edge
+   (`jng_l pos = -950`, `jng_r pos = +70`). At 800 that's start −150/870 → both travel 450 →
+   they meet together. At 1067: start 117 (on-screen!) / 1137 → 316 vs 584, so the left half
+   landed early and it looked broken. `jng_l`'s offset really means "150px off the **left**
+   edge" → `-950 - 267 = -1217`. Verified: both halves now land on the same frame (t=682).
+
+3. **Intro jets vanished mid-screen.** Enemies that fly across are removed when their *path*
+   runs out (`CEnemy::NextNodePos` clears the alive flag), not when they cross an edge. The
+   jets use the global path `ld` (reach 1000) at `path_scale = 100`, spawning at `Width+100`:
+   at 800, `900 - 1000 = -100` (just off-screen, correct); at 1067, `1167 - 1000 = +167`.
+   Measured under gdb: 7/7 despawned at x=167.4. Fix: scale the *intro jet's* `path_scale` so
+   its reach is `Width+200`. Re-measured: 7/7 despawn at −103.
+
+   **Why not just lengthen `ld`:** it's the engine's *universal* straight-line path —
+   **1686 call sites** — and `path_scale` is used as a direction vector against it
+   (`0,100` = missiles straight up, `-100,100` = 45° diagonals, `100,40` = shallow dives).
+   `ld`'s `direct = -1000,-1000` only reads as "reach 1000" when the Y scale is 0. Changing
+   its dx would silently re-angle every diagonal and every missile in the game.
+
+4. **Credits / ESC prompt misplaced.** The credits are two 150px panels alternating sides
+   every 29s: `titles_1` hugs the left edge (x=20), `titles_2` sits 50px off the right edge
+   (x=600). Kept edge-anchored (`titles_2` → 867) to preserve the alternating design; the
+   ESC prompt is a centred composition → 553.
+
+5. **Particles spawned mid-screen (game-wide).** Every level's `[FIELD]` emits ambient
+   particles (starfield, rain) from screen-space rects. 96 of them across 70 level files, in
+   two patterns: a narrow strip at/beyond the old right edge (`800,64,820,600` ×49 and
+   `850,0,860,600` ×35 — the shop levels use a 50px margin, so the rule keys off `x1 >= 800`
+   and preserves each margin), and a full-width strip above the screen that rain falls from
+   (`0,-20,800,-10` ×12 — at 1067 the right 267px would get no rain). Verified in the intro:
+   721/803 spawns now land in 1067..1087, was 800..820. `level_zog`'s `650,0,660,520` matches
+   neither pattern (650 is mid-screen even at 800), so it's left alone and reported.
 
 ---
 

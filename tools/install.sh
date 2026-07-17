@@ -8,7 +8,7 @@ GAME="${1:-$PWD}"
 for f in jng_gold Data.ini Game.cfg; do
   [ -f "$GAME/$f" ] && [ ! -f "$GAME/$f.orig" ] && cp "$GAME/$f" "$GAME/$f.orig" && echo "backed up $f -> $f.orig"
 done
-for f in jng_gold hd.dat Data.ini Game.cfg; do
+for f in jng_gold hd.dat ws.dat Data.ini Game.cfg; do
   cp "$HERE/$f" "$GAME/$f" && echo "installed $f"
 done
 echo "Done. Launch normally (Steam). Uninstall with ./uninstall.sh"

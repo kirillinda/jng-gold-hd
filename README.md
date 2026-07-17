@@ -150,6 +150,8 @@ tools/
   upscale.py             the upscaling pipeline (transparency-aware)
   build_batch.py         upscale every asset 4x and pack build/hd.dat (GPU batch)
   patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
+  patch_widescreen.py    binary-patch the leftover hardcoded 800x600 gameplay bounds (ELF)
+  make_widescreen_defs.py  re-author the 800-wide level defs for the target width (ws.dat)
   make_gamecfg.py        generate a widescreen Game.cfg (Linux)
   install.sh / install.ps1      drop-in installer   (Linux / Windows)
   uninstall.sh / uninstall.ps1  drop-in uninstaller (Linux / Windows)
@@ -176,11 +178,24 @@ local and the game's copyrighted art is never committed.
 
 ## How it works (short version)
 
-1. **Widescreen** is a config change: the engine renders into a pixel-space
+1. **Widescreen** is *mostly* a config change: the engine renders into a pixel-space
    `glOrtho(0, Width, Height, 0)`, so we set a 16:9 logical resolution at the native
    600px height (`1067×600`). Gameplay and HUD reposition correctly. On Linux this goes in
    the game-folder `Game.cfg`; on Windows it goes in `Documents\JnGGold\Game.ini` (`[VIDEO]`
    `Width`/`Height`/`ratio43`) — the installer handles it.
+   Mostly — five gameplay sites still hardcoded 800×600, the worst being the
+   `on_screen_right` behavior event, which fired at `x > 800 - w`. Since enemies spawn at
+   the true right edge (`x ≈ Width`), every enemy was born past that stale bound and
+   instantly got the "you reached the right edge, turn back / leave" behavior — torpedoes
+   faded out on spawn, the tanker escort auto-failed, walkers turned at an invisible wall.
+   `patch_widescreen.py` makes all five read the real resolution at runtime (Linux ELF only).
+   More 4:3 assumptions live in the game's **data** — the intro logo landed off-centre, its
+   two halves arrived at different times, the intro jets died mid-screen, and every level's
+   ambient particles (starfield, rain) spawned in a strip at x=800 instead of the real right
+   edge. `make_widescreen_defs.py` re-authors those defs for the target width into a tiny
+   `ws.dat` overlay (pure data — it applies on Windows too). See
+   [4a](docs/HOW_IT_WORKS.md#4a-the-43-assumptions-the-config-change-does-not-fix)
+   and [4b](docs/HOW_IT_WORKS.md#4b-the-43-assumptions-that-live-in-the-games-data) in the docs.
 2. **The engine draws every texture 1:1** — one texture pixel = one logical unit — so a
    bigger texture would just draw bigger. The **binary patch** makes each loaded texture
    report its size as ¼ of the real (4×) pixels, so sprites keep their original size and

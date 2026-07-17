@@ -18,6 +18,8 @@
 #   3. resolves / downloads the upscale model
 #   4. upscales every asset 4x and packs the HD override archive  (build/hd.dat)
 #   5. binary-patches the game executable                          (build/jng_gold)
+#        - patch_hd.py:         draw 4x art at its original on-screen size
+#        - patch_widescreen.py: kill the leftover hardcoded 800x600 gameplay bounds
 #   6. assembles two deliverables under dist/:
 #        dist/mod-dropin/    only the changed files (+ install/uninstall scripts)
 #        dist/patched-game/  a full, ready-to-run copy of the patched game
@@ -88,24 +90,33 @@ HD_MODEL="$MODEL" JNG_GAME_DIR="$GAME_DIR" "$PY" tools/build_batch.py
 SRC_BIN="$GAME_DIR/jng_gold"
 [ -f "$GAME_DIR/jng_gold.orig" ] && SRC_BIN="$GAME_DIR/jng_gold.orig"
 log "Patching game binary ($SRC_BIN) -> build/jng_gold"
-"$PY" tools/patch_hd.py "$SRC_BIN" "build/jng_gold"
+"$PY" tools/patch_hd.py "$SRC_BIN" "build/jng_gold.hd"
+"$PY" tools/patch_widescreen.py "build/jng_gold.hd" "build/jng_gold"
+rm -f "build/jng_gold.hd"
 
 # 7. Assemble deliverables ---------------------------------------------------
 log "Assembling dist/"
 DROPIN="dist/mod-dropin"; FULL="dist/patched-game"
 rm -rf "$DROPIN" "$FULL"; mkdir -p "$DROPIN" "$FULL"
 
-# Data.ini that loads the overlay first (first match wins) and the widescreen config.
-printf 'data_file = hd.dat\ndata_file = update.dat\ndata_file = jng.dat\n' > "$DROPIN/Data.ini"
+# ws.dat: the level defs whose coordinates were authored for an 800-wide screen, re-authored
+# for the target Width. Kept OUT of hd.dat and listed first, so changing the resolution is a
+# one-second rebuild rather than re-upscaling 1930 images. Both it and Game.cfg take Width
+# from tools/config.py, so they always agree.
+log "Building build/ws.dat (resolution-dependent defs)"
+"$PY" tools/make_widescreen_defs.py build/ws.dat
+
+# Data.ini loads the overlays first (first match wins) and the widescreen config.
+printf 'data_file = ws.dat\ndata_file = hd.dat\ndata_file = update.dat\ndata_file = jng.dat\n' > "$DROPIN/Data.ini"
 "$PY" tools/make_gamecfg.py > "$DROPIN/Game.cfg"
-cp build/hd.dat build/jng_gold "$DROPIN/"
+cp build/hd.dat build/ws.dat build/jng_gold "$DROPIN/"
 cp tools/install.sh tools/uninstall.sh "$DROPIN/"; chmod +x "$DROPIN"/*.sh
 cat > "$DROPIN/README.txt" <<EOF
 Jets'n'Guns Gold HD + Widescreen — drop-in mod
 Copy these files into your game folder:
   $GAME_DIR
 run ./install.sh from inside that folder (backs up originals), or copy manually:
-  jng_gold  hd.dat  Data.ini  Game.cfg
+  jng_gold  hd.dat  ws.dat  Data.ini  Game.cfg
 Uninstall with ./uninstall.sh (restores the .orig backups).
 EOF
 
@@ -115,7 +126,7 @@ cp -a "$GAME_DIR/." "$FULL/"
 rm -f "$FULL"/*.orig "$FULL"/*.bak "$FULL/jng_gold_hd" "$FULL/hd_test.dat" \
       "$FULL/game.log" "$FULL/steam_appid.txt"
 rm -rf "$FULL/screenshots" "$FULL/saves"
-cp -f "$DROPIN/jng_gold" "$DROPIN/hd.dat" "$DROPIN/Data.ini" "$DROPIN/Game.cfg" "$FULL/"
+cp -f "$DROPIN/jng_gold" "$DROPIN/hd.dat" "$DROPIN/ws.dat" "$DROPIN/Data.ini" "$DROPIN/Game.cfg" "$FULL/"
 
 log "Done."
 echo "  dist/mod-dropin/    -> copy into your game folder (or run its install.sh)"

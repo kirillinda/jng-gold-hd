@@ -5,5 +5,5 @@ GAME="${1:-$PWD}"
 for f in jng_gold Data.ini Game.cfg; do
   [ -f "$GAME/$f.orig" ] && mv -f "$GAME/$f.orig" "$GAME/$f" && echo "restored $f"
 done
-rm -f "$GAME/hd.dat" && echo "removed hd.dat"
+rm -f "$GAME/hd.dat" "$GAME/ws.dat" && echo "removed hd.dat / ws.dat"
 echo "Stock game restored."
