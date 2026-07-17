@@ -131,11 +131,14 @@ The [Prerequisites](#prerequisites) section above has the step-by-step install. 
 
 - The Steam build of **Jets'n'Guns Gold 1.308 ST** (Linux or Windows).
 - **Python 3.10+** and (optionally) **Git**.
-- A **Vulkan-capable GPU** — any modern AMD/Intel/NVIDIA card with an up-to-date driver; no
-  CUDA/ROCm needed (the upscaler is `realesrgan-ncnn-vulkan`). Developed on an AMD RX 7900 XTX.
+- For the **default HD backend (GSR):** **Docker** + an **AMD GPU with ROCm** (developed on
+  an AMD RX 7900 XTX). The ROCm/PyTorch toolchain lives entirely inside the container — no ML
+  packages on your host.
+- For the **legacy ncnn backend** (`HD_BACKEND=ncnn`): any **Vulkan-capable GPU** (AMD/Intel/
+  NVIDIA) with an up-to-date driver; no CUDA/ROCm/Docker needed.
 
-Everything else (the Vulkan upscaler binary, the LZO codec, the Python image libraries) is
-fetched automatically into a local `tools/venv/` — no system packages to install by hand.
+Everything else (the upscaler, the LZO codec, the Python image libraries) is fetched
+automatically — no system packages to install by hand.
 
 ---
 
@@ -147,8 +150,13 @@ tools/
   config.py              paths / parameters (env-overridable; OS-aware defaults)
   jngdat.py              reader + writer for the game's LZO .dat archives
   extract.py             unpack the .dat archives into assets/
-  upscale.py             the upscaling pipeline (transparency-aware)
-  build_batch.py         upscale every asset 4x and pack build/hd.dat (GPU batch)
+  upscale.py             legacy ncnn upscaling pipeline (transparency-aware)
+  build_batch.py         legacy ncnn: upscale every asset 4x and pack build/hd.dat
+  gsr/                   default HD backend — GPU super-resolution (see below)
+    Dockerfile           ROCm 7.x + PyTorch + spandrel image (self-contained)
+    build_hd_gsr.py      sheet-aware GAN upscaler -> build/hd.dat
+    run.sh               build the image + run the upscale in the container
+    models/              GAN model weights (git-ignored; fetched from HuggingFace)
   patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
   patch_widescreen.py    binary-patch the leftover hardcoded 800x600 gameplay bounds (ELF)
   make_widescreen_defs.py  re-author the 800-wide level defs for the target width (ws.dat)
@@ -175,6 +183,38 @@ only changed files are re-upscaled and repacked. `assets/` is git-ignored, so yo
 local and the game's copyrighted art is never committed.
 
 ---
+
+## HD art backend (GSR — the default)
+
+The art is upscaled by a modern **GAN super-resolution** model (`4x-UltraSharpV2`,
+RealPLKSR/DAT2) run through **PyTorch + spandrel** on the GPU, inside a self-contained
+**ROCm 7.x Docker container** — nothing is installed on your host. This replaces the old
+`realesrgan-ncnn` + `4x_NMKD-Siax` path, whose output was soft/"soapy". The pipeline is
+sprite-engine-aware, which is what makes the result usable in-game rather than just "an
+upscaled PNG":
+
+- **Animation sheets are split per frame.** A sprite sheet's `frames_wh = N, cols, rows`
+  is read from the game's own defs; each frame is cut out on the exact `w // cols` grid the
+  engine samples, upscaled alone, and reassembled — so detail never smears across frame
+  borders. The 5×7 `hero_faces.jpg` avatar grid is split the same way.
+- **Transparency is preserved** per flavour (magenta color-key, RGBA `.tga`, grayscale
+  additive masks), with colour bled under the key so there are no halos, and hard alpha
+  edges scaled faithfully rather than hallucinated.
+- **Text is not AI'd.** Font/glyph sheets and HUD digits are scaled with LANCZOS (no letter
+  warping) but still 4×'d, and the HTML manual is left at 1× (it isn't a game texture).
+- **FP16 inference** dispatches conv/matmul to the RX 7900 XTX's RDNA3 **WMMA** matrix cores;
+  the default model is attention-free (Flash-Attention isn't a win on gfx1100).
+
+Build it (the default path in `build.sh`), or run it directly:
+
+```bash
+GSR_MODEL=4x-UltraSharpV2_Lite tools/gsr/run.sh     # crisp + fast (default)
+GSR_MODEL=4x-UltraSharpV2      tools/gsr/run.sh      # DAT2, max quality, slower
+```
+
+Requirements: **Docker** and an **AMD GPU with ROCm** (developed on a 7900 XTX). Model
+weights are fetched once from HuggingFace (set `HF_TOKEN` if you hit rate limits). To fall
+back to the original Vulkan/ncnn upscaler on non-ROCm systems, run `HD_BACKEND=ncnn ./build.sh`.
 
 ## How it works (short version)
 
@@ -215,5 +255,8 @@ exactly why the ÷4 patch is mathematically correct — is in [docs/HOW_IT_WORKS
 ## Credits
 
 - **Jets'n'Guns Gold** © [Rake in Grass](https://www.rakeingrass.com/).
-- Upscaling via [Real-ESRGAN / realesrgan-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN)
-  with the community **4x_NMKD-Siax_200k** model.
+- Default HD upscaling via [spandrel](https://github.com/chaiNNer-org/spandrel) + PyTorch/ROCm
+  with the community [**4x-UltraSharpV2**](https://openmodeldb.info/models/4x-UltraSharpV2)
+  (RealPLKSR/DAT2) model by Kim2091.
+- Legacy backend: [Real-ESRGAN / realesrgan-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN)
+  with the **4x_NMKD-Siax_200k** model.

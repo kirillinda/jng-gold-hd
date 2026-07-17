@@ -31,6 +31,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 
 GAME_DIR="${JNG_GAME_DIR:-$HOME/.local/share/Steam/steamapps/common/JnG Gold}"
+# HD art backend:
+#   gsr  (default) — modern GAN super-resolution (spandrel/DAT2/RealPLKSR) in a
+#                    ROCm Docker container; crisp, sheet-aware. See tools/gsr/.
+#   ncnn           — the original realesrgan-ncnn-vulkan path (soft/"soapy").
+HD_BACKEND="${HD_BACKEND:-gsr}"
 MODEL="${1:-4x_NMKD-Siax_200k}"
 DEFAULT_MODEL="4x_NMKD-Siax_200k"
 UPSC_DIR="tools/upscaler"
@@ -50,28 +55,28 @@ log "Python venv + dependencies"
 "$PY" -m pip install --quiet --upgrade pip
 "$PY" -m pip install --quiet -r tools/requirements.txt
 
-# 2. Upscaler binary ---------------------------------------------------------
-if [ ! -x "$UPSC_DIR/realesrgan-ncnn-vulkan" ]; then
-  log "Downloading realesrgan-ncnn-vulkan"
-  mkdir -p "$UPSC_DIR"
-  url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
-  curl -sL -o /tmp/realesrgan.zip "$url"
-  unzip -o -q /tmp/realesrgan.zip -d "$UPSC_DIR"
-  chmod +x "$UPSC_DIR/realesrgan-ncnn-vulkan"
-fi
-
-# 3. Model -------------------------------------------------------------------
-if [ ! -f "$MODELS_DIR/$MODEL.param" ]; then
-  if [ "$MODEL" != "$DEFAULT_MODEL" ]; then
-    die "model '$MODEL' not found in $MODELS_DIR (drop the .param/.bin there, or omit for the default)"
+# 2-3. ncnn upscaler binary + model — only for the legacy ncnn backend -------
+if [ "$HD_BACKEND" = ncnn ]; then
+  if [ ! -x "$UPSC_DIR/realesrgan-ncnn-vulkan" ]; then
+    log "Downloading realesrgan-ncnn-vulkan"
+    mkdir -p "$UPSC_DIR"
+    url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
+    curl -sL -o /tmp/realesrgan.zip "$url"
+    unzip -o -q /tmp/realesrgan.zip -d "$UPSC_DIR"
+    chmod +x "$UPSC_DIR/realesrgan-ncnn-vulkan"
   fi
-  log "Downloading default model $DEFAULT_MODEL"
-  base="https://github.com/upscayl/custom-models/raw/main/models"
-  for ext in param bin; do
-    curl -sL -o "$MODELS_DIR/$DEFAULT_MODEL.$ext" "$base/$DEFAULT_MODEL.$ext"
-  done
+  if [ ! -f "$MODELS_DIR/$MODEL.param" ]; then
+    if [ "$MODEL" != "$DEFAULT_MODEL" ]; then
+      die "model '$MODEL' not found in $MODELS_DIR (drop the .param/.bin there, or omit for the default)"
+    fi
+    log "Downloading default model $DEFAULT_MODEL"
+    base="https://github.com/upscayl/custom-models/raw/main/models"
+    for ext in param bin; do
+      curl -sL -o "$MODELS_DIR/$DEFAULT_MODEL.$ext" "$base/$DEFAULT_MODEL.$ext"
+    done
+  fi
+  log "Using ncnn model: $MODEL"
 fi
-log "Using model: $MODEL"
 
 # 4. Unpack the game's assets (from YOUR copy) if not already present --------
 if [ -z "$(ls -A assets/DATA 2>/dev/null)" ]; then
@@ -80,8 +85,13 @@ if [ -z "$(ls -A assets/DATA 2>/dev/null)" ]; then
 fi
 
 # 5. Build the HD override archive ------------------------------------------
-log "Upscaling assets and packing build/hd.dat (this uses the GPU)"
-HD_MODEL="$MODEL" JNG_GAME_DIR="$GAME_DIR" "$PY" tools/build_batch.py
+if [ "$HD_BACKEND" = gsr ]; then
+  log "Upscaling assets and packing build/hd.dat (GSR: ROCm Docker + GAN model)"
+  GSR_MODEL="${GSR_MODEL:-4x-UltraSharpV2_Lite}" tools/gsr/run.sh
+else
+  log "Upscaling assets and packing build/hd.dat (ncnn, this uses the GPU)"
+  HD_MODEL="$MODEL" JNG_GAME_DIR="$GAME_DIR" "$PY" tools/build_batch.py
+fi
 
 # 6. Patch the game binary ---------------------------------------------------
 # Always patch from the STOCK binary. If the mod is already installed, the
