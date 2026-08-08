@@ -9,6 +9,11 @@ A mod for the **Steam build of Jets'n'Guns Gold (v1.308 ST)** — **Linux and Wi
 It is delivered as a **non-destructive overlay** plus a tiny binary patch — the original
 `jng.dat` is never touched, and everything is fully reversible.
 
+![Before and after: whole sprites at 4x](docs/images/upscale-comparison.png)
+
+*Left: the original art at 4× nearest-neighbour, i.e. what a naive blow-up looks like.
+Right: this mod. Both are one frame of a sprite sheet, shown at 1:1 with the 4× output.*
+
 > ⚠️ You must own Jets'n'Guns Gold. This repo contains **only tooling and docs** — it builds
 > everything from your own copy of the game and never redistributes the game's files or art
 > (© Rake in Grass). Shared **non-commercially with the developers' blessing**; do not sell it
@@ -131,11 +136,14 @@ The [Prerequisites](#prerequisites) section above has the step-by-step install. 
 
 - The Steam build of **Jets'n'Guns Gold 1.308 ST** (Linux or Windows).
 - **Python 3.10+** and (optionally) **Git**.
-- A **Vulkan-capable GPU** — any modern AMD/Intel/NVIDIA card with an up-to-date driver; no
-  CUDA/ROCm needed (the upscaler is `realesrgan-ncnn-vulkan`). Developed on an AMD RX 7900 XTX.
+- For the **default HD backend (GSR):** **Docker** + an **AMD GPU with ROCm** (developed on
+  an AMD RX 7900 XTX). The ROCm/PyTorch toolchain lives entirely inside the container — no ML
+  packages on your host.
+- For the **legacy ncnn backend** (`HD_BACKEND=ncnn`): any **Vulkan-capable GPU** (AMD/Intel/
+  NVIDIA) with an up-to-date driver; no CUDA/ROCm/Docker needed.
 
-Everything else (the Vulkan upscaler binary, the LZO codec, the Python image libraries) is
-fetched automatically into a local `tools/venv/` — no system packages to install by hand.
+Everything else (the upscaler, the LZO codec, the Python image libraries) is fetched
+automatically — no system packages to install by hand.
 
 ---
 
@@ -147,8 +155,16 @@ tools/
   config.py              paths / parameters (env-overridable; OS-aware defaults)
   jngdat.py              reader + writer for the game's LZO .dat archives
   extract.py             unpack the .dat archives into assets/
-  upscale.py             the upscaling pipeline (transparency-aware)
-  build_batch.py         upscale every asset 4x and pack build/hd.dat (GPU batch)
+  upscale.py             legacy ncnn upscaling pipeline (transparency-aware)
+  build_batch.py         legacy ncnn: upscale every asset 4x and pack build/hd.dat
+  gsr/                   default HD backend — GPU super-resolution (see below)
+    Dockerfile           ROCm 7.x + PyTorch + spandrel image (self-contained)
+    build_hd_gsr.py      sheet-aware GAN upscaler -> build/hd.dat
+    run.sh               build the image + run the upscale in the container
+    verify_hd.py         check hd.dat: valid archive, every image exactly 4x
+    scan_quality.py      check hd.dat for upscale corruption (alpha-aware)
+    make_showcase.py     regenerate the before/after figures in docs/images/
+    models/              GAN model weights (git-ignored; fetched from HuggingFace)
   patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
   patch_widescreen.py    binary-patch the leftover hardcoded 800x600 gameplay bounds (ELF)
   make_widescreen_defs.py  re-author the 800-wide level defs for the target width (ws.dat)
@@ -175,6 +191,73 @@ only changed files are re-upscaled and repacked. `assets/` is git-ignored, so yo
 local and the game's copyrighted art is never committed.
 
 ---
+
+## HD art backend (GSR — the default)
+
+The art is upscaled by a modern **GAN super-resolution** model (`4x-UltraSharpV2`,
+RealPLKSR/DAT2) run through **PyTorch + spandrel** on the GPU, inside a self-contained
+**ROCm 7.x Docker container** — nothing is installed on your host. This replaces the old
+`realesrgan-ncnn` + `4x_NMKD-Siax` path, whose output was soft/"soapy". The pipeline is
+sprite-engine-aware, which is what makes the result usable in-game rather than just "an
+upscaled PNG":
+
+![Detail comparison at 1:1](docs/images/upscale-detail.png)
+
+*The most detailed region of three sprites, at 1:1 with the 4× output. Bicubic smooths the
+pixel grid but invents no detail; the GAN reconstructs plausible surface texture — panel
+grain on the Goliath's armour, the machined bevel around Roger's emblem, corrosion on the
+submarine hull.*
+
+- **Animation sheets are split per frame.** A sprite sheet's `frames_wh = N, cols, rows`
+  is read from the game's own defs; each frame is cut out on the exact `w // cols` grid the
+  engine samples, upscaled alone, and reassembled — so detail never smears across frame
+  borders. The 5×7 `hero_faces.jpg` avatar grid is split the same way.
+- **Transparency is preserved** per flavour (magenta color-key, RGBA `.tga`, grayscale
+  additive masks), with colour bled under the key so there are no halos, and hard alpha
+  edges scaled faithfully rather than hallucinated.
+- **Text is not AI'd.** Font/glyph sheets and HUD digits are scaled with LANCZOS (no letter
+  warping) but still 4×'d, and the HTML manual is left at 1× (it isn't a game texture).
+- **Sprite edges are de-jagged** (`GSR_AA=1`, on by default). The originals use a 1-bit
+  magenta colour key, so a 4× upscale turns every edge stair-step into a 4×4 block. The
+  silhouette is vectorised with **potrace** and re-rasterised with antialiasing, giving a
+  smooth continuous outline instead of a blocky (or merely blurry) one. Each result is
+  coverage-checked against the source mask and falls back to a faithful LANCZOS edge if the
+  trace drifts, so a sprite can never come out stretched or clipped.
+
+  ![Edge de-jagging](docs/images/edge-dejag.png)
+
+  *Zoomed 3× with nearest-neighbour, so these are real output pixels. Note that the middle
+  column is already GAN-upscaled — the interior is sharp, but the 1-bit key leaves the
+  silhouette a staircase. Simply blurring that edge would only trade a sharp staircase for a
+  soft one; tracing it produces an actual curve.*
+- **FP16 inference** dispatches conv/matmul to the RX 7900 XTX's RDNA3 **WMMA** matrix cores;
+  the default model is attention-free (Flash-Attention isn't a win on gfx1100).
+- **Every output is verified.** A correct 4× result box-downscaled back to source size
+  matches it closely; anything implausible is retried and then LANCZOS'd, so no corrupt
+  tile can reach the archive. `tools/gsr/scan_quality.py` re-checks the packed `hd.dat`.
+
+Build it (the default path in `build.sh`), or run it directly:
+
+```bash
+GSR_MODEL=4x-UltraSharpV2_Lite tools/gsr/run.sh     # crisp + fast (default)
+GSR_MODEL=4x-UltraSharpV2      tools/gsr/run.sh     # DAT2, max quality, slower
+GSR_AA=0                       tools/gsr/run.sh     # hard 1-bit edges (no de-jag)
+```
+
+Requirements: **Docker** and an **AMD GPU with ROCm** (developed on a 7900 XTX). Model
+weights are fetched once from HuggingFace (set `HF_TOKEN` if you hit rate limits). To fall
+back to the original Vulkan/ncnn upscaler on non-ROCm systems, run `HD_BACKEND=ncnn ./build.sh`.
+
+On a machine with both a discrete GPU and an APU, `/dev/dri` exposes both to the container;
+`run.sh` auto-detects the discrete one and pins `HIP_VISIBLE_DEVICES` to it. Override with
+`GSR_GPU=<index>` if the detection picks wrong.
+
+> **Note for ROCm hackers:** do not set `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`
+> here. It looks ideal for a workload of thousands of differently-sized images, but on
+> ROCm 7.2.4 it corrupted ~15% of outputs (NaN/Inf, and bogus reduction results) versus
+> ~0% with the stock caching allocator. Likewise `HSA_OVERRIDE_GFX_VERSION` applies to
+> *every* visible agent, so on an APU box it makes the integrated GPU masquerade as the
+> discrete one — pin the device instead.
 
 ## How it works (short version)
 
@@ -215,5 +298,8 @@ exactly why the ÷4 patch is mathematically correct — is in [docs/HOW_IT_WORKS
 ## Credits
 
 - **Jets'n'Guns Gold** © [Rake in Grass](https://www.rakeingrass.com/).
-- Upscaling via [Real-ESRGAN / realesrgan-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN)
-  with the community **4x_NMKD-Siax_200k** model.
+- Default HD upscaling via [spandrel](https://github.com/chaiNNer-org/spandrel) + PyTorch/ROCm
+  with the community [**4x-UltraSharpV2**](https://openmodeldb.info/models/4x-UltraSharpV2)
+  (RealPLKSR/DAT2) model by Kim2091.
+- Legacy backend: [Real-ESRGAN / realesrgan-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN)
+  with the **4x_NMKD-Siax_200k** model.

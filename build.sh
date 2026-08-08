@@ -5,25 +5,33 @@
 # Usage:
 #   ./build.sh [MODEL_NAME]
 #
-#   MODEL_NAME   Optional. Name of a realesrgan-ncnn model (a MODEL.param/MODEL.bin
-#                pair) under tools/upscaler/models/. If omitted, the default model
-#                the mod was released with (4x_NMKD-Siax_200k) is downloaded and used.
+#   MODEL_NAME   Optional, and only used by the legacy ncnn backend: the name of a
+#                realesrgan-ncnn model (a MODEL.param/MODEL.bin pair) under
+#                tools/upscaler/models/. Ignored by the default GSR backend, which
+#                selects its model with GSR_MODEL.
 #
 # Environment overrides:
 #   JNG_GAME_DIR   Path to the game install (default: the standard Steam location).
+#   HD_BACKEND     gsr (default) | ncnn — which upscaler produces the HD art.
+#   GSR_MODEL      GSR model basename (default: 4x-UltraSharpV2_Lite).
+#   GSR_AA         1 (default) — de-jag sprite silhouettes; 0 for hard 1-bit edges.
+#   GSR_GPU        HIP device index (default: auto-detect the discrete GPU).
+#   HF_TOKEN       HuggingFace token, only needed the first time to fetch weights.
 #
-# What it does:
-#   1. sets up a Python venv with Pillow + numpy
-#   2. downloads realesrgan-ncnn-vulkan (Vulkan GPU upscaler) if missing
-#   3. resolves / downloads the upscale model
-#   4. upscales every asset 4x and packs the HD override archive  (build/hd.dat)
-#   5. binary-patches the game executable                          (build/jng_gold)
-#        - patch_hd.py:         draw 4x art at its original on-screen size
-#        - patch_widescreen.py: kill the leftover hardcoded 800x600 gameplay bounds
-#   6. assembles two deliverables under dist/:
-#        dist/mod-dropin/    only the changed files (+ install/uninstall scripts)
-#        dist/patched-game/  a full, ready-to-run copy of the patched game
+# What it does (numbers match the section headers below):
+#   1.   sets up a Python venv with Pillow + numpy
+#   2-3. (ncnn backend only) downloads realesrgan-ncnn-vulkan and its model
+#   4.   unpacks the game's assets from YOUR copy into assets/
+#   5.   upscales every asset 4x and packs the HD override archive (build/hd.dat)
+#   6.   binary-patches the game executable                        (build/jng_gold)
+#          - patch_hd.py:         draw 4x art at its original on-screen size
+#          - patch_widescreen.py: kill the leftover hardcoded 800x600 gameplay bounds
+#   7.   assembles two deliverables under dist/:
+#          dist/mod-dropin/    only the changed files (+ install/uninstall scripts)
+#          dist/patched-game/  a full, ready-to-run copy of the patched game
 #
+# Requirements: python3, and for the default GSR backend, Docker plus an AMD GPU
+# with /dev/kfd (ROCm runs inside the container — nothing is installed on the host).
 # Assumes the Linux Steam build of Jets'n'Guns Gold, version 1.308 ST.
 set -euo pipefail
 
@@ -31,6 +39,11 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO"
 
 GAME_DIR="${JNG_GAME_DIR:-$HOME/.local/share/Steam/steamapps/common/JnG Gold}"
+# HD art backend:
+#   gsr  (default) — modern GAN super-resolution (spandrel/DAT2/RealPLKSR) in a
+#                    ROCm Docker container; crisp, sheet-aware. See tools/gsr/.
+#   ncnn           — the original realesrgan-ncnn-vulkan path (soft/"soapy").
+HD_BACKEND="${HD_BACKEND:-gsr}"
 MODEL="${1:-4x_NMKD-Siax_200k}"
 DEFAULT_MODEL="4x_NMKD-Siax_200k"
 UPSC_DIR="tools/upscaler"
@@ -50,28 +63,28 @@ log "Python venv + dependencies"
 "$PY" -m pip install --quiet --upgrade pip
 "$PY" -m pip install --quiet -r tools/requirements.txt
 
-# 2. Upscaler binary ---------------------------------------------------------
-if [ ! -x "$UPSC_DIR/realesrgan-ncnn-vulkan" ]; then
-  log "Downloading realesrgan-ncnn-vulkan"
-  mkdir -p "$UPSC_DIR"
-  url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
-  curl -sL -o /tmp/realesrgan.zip "$url"
-  unzip -o -q /tmp/realesrgan.zip -d "$UPSC_DIR"
-  chmod +x "$UPSC_DIR/realesrgan-ncnn-vulkan"
-fi
-
-# 3. Model -------------------------------------------------------------------
-if [ ! -f "$MODELS_DIR/$MODEL.param" ]; then
-  if [ "$MODEL" != "$DEFAULT_MODEL" ]; then
-    die "model '$MODEL' not found in $MODELS_DIR (drop the .param/.bin there, or omit for the default)"
+# 2-3. ncnn upscaler binary + model — only for the legacy ncnn backend -------
+if [ "$HD_BACKEND" = ncnn ]; then
+  if [ ! -x "$UPSC_DIR/realesrgan-ncnn-vulkan" ]; then
+    log "Downloading realesrgan-ncnn-vulkan"
+    mkdir -p "$UPSC_DIR"
+    url="https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesrgan-ncnn-vulkan-20220424-ubuntu.zip"
+    curl -sL -o /tmp/realesrgan.zip "$url"
+    unzip -o -q /tmp/realesrgan.zip -d "$UPSC_DIR"
+    chmod +x "$UPSC_DIR/realesrgan-ncnn-vulkan"
   fi
-  log "Downloading default model $DEFAULT_MODEL"
-  base="https://github.com/upscayl/custom-models/raw/main/models"
-  for ext in param bin; do
-    curl -sL -o "$MODELS_DIR/$DEFAULT_MODEL.$ext" "$base/$DEFAULT_MODEL.$ext"
-  done
+  if [ ! -f "$MODELS_DIR/$MODEL.param" ]; then
+    if [ "$MODEL" != "$DEFAULT_MODEL" ]; then
+      die "model '$MODEL' not found in $MODELS_DIR (drop the .param/.bin there, or omit for the default)"
+    fi
+    log "Downloading default model $DEFAULT_MODEL"
+    base="https://github.com/upscayl/custom-models/raw/main/models"
+    for ext in param bin; do
+      curl -sL -o "$MODELS_DIR/$DEFAULT_MODEL.$ext" "$base/$DEFAULT_MODEL.$ext"
+    done
+  fi
+  log "Using ncnn model: $MODEL"
 fi
-log "Using model: $MODEL"
 
 # 4. Unpack the game's assets (from YOUR copy) if not already present --------
 if [ -z "$(ls -A assets/DATA 2>/dev/null)" ]; then
@@ -80,8 +93,13 @@ if [ -z "$(ls -A assets/DATA 2>/dev/null)" ]; then
 fi
 
 # 5. Build the HD override archive ------------------------------------------
-log "Upscaling assets and packing build/hd.dat (this uses the GPU)"
-HD_MODEL="$MODEL" JNG_GAME_DIR="$GAME_DIR" "$PY" tools/build_batch.py
+if [ "$HD_BACKEND" = gsr ]; then
+  log "Upscaling assets and packing build/hd.dat (GSR: ROCm Docker + GAN model)"
+  GSR_MODEL="${GSR_MODEL:-4x-UltraSharpV2_Lite}" tools/gsr/run.sh
+else
+  log "Upscaling assets and packing build/hd.dat (ncnn, this uses the GPU)"
+  HD_MODEL="$MODEL" JNG_GAME_DIR="$GAME_DIR" "$PY" tools/build_batch.py
+fi
 
 # 6. Patch the game binary ---------------------------------------------------
 # Always patch from the STOCK binary. If the mod is already installed, the

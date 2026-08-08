@@ -10,8 +10,15 @@ tools/lib32shim/
 
 # Regenerable upscale cache (large) and build scratch/outputs
 upscaled/
+upscaled_gsr/
 build/
 dist/
+
+# GSR (GPU super-resolution) model weights — large, fetched from HuggingFace.
+tools/gsr/models/
+# MIOpen kernel cache written by the container.
+tools/gsr/.miopen/
+.miopen/
 
 # Never commit the game's proprietary binary / archives / art.
 # Users generate assets/ from their own copy of the game (the builder runs extract.py).
