@@ -9,6 +9,11 @@ A mod for the **Steam build of Jets'n'Guns Gold (v1.308 ST)** — **Linux and Wi
 It is delivered as a **non-destructive overlay** plus a tiny binary patch — the original
 `jng.dat` is never touched, and everything is fully reversible.
 
+![Before and after: whole sprites at 4x](docs/images/upscale-comparison.png)
+
+*Left: the original art at 4× nearest-neighbour, i.e. what a naive blow-up looks like.
+Right: this mod. Both are one frame of a sprite sheet, shown at 1:1 with the 4× output.*
+
 > ⚠️ You must own Jets'n'Guns Gold. This repo contains **only tooling and docs** — it builds
 > everything from your own copy of the game and never redistributes the game's files or art
 > (© Rake in Grass). Shared **non-commercially with the developers' blessing**; do not sell it
@@ -158,6 +163,7 @@ tools/
     run.sh               build the image + run the upscale in the container
     verify_hd.py         check hd.dat: valid archive, every image exactly 4x
     scan_quality.py      check hd.dat for upscale corruption (alpha-aware)
+    make_showcase.py     regenerate the before/after figures in docs/images/
     models/              GAN model weights (git-ignored; fetched from HuggingFace)
   patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
   patch_widescreen.py    binary-patch the leftover hardcoded 800x600 gameplay bounds (ELF)
@@ -195,6 +201,13 @@ RealPLKSR/DAT2) run through **PyTorch + spandrel** on the GPU, inside a self-con
 sprite-engine-aware, which is what makes the result usable in-game rather than just "an
 upscaled PNG":
 
+![Detail comparison at 1:1](docs/images/upscale-detail.png)
+
+*The most detailed region of three sprites, at 1:1 with the 4× output. Bicubic smooths the
+pixel grid but invents no detail; the GAN reconstructs plausible surface texture — panel
+grain on the Goliath's armour, the machined bevel around Roger's emblem, corrosion on the
+submarine hull.*
+
 - **Animation sheets are split per frame.** A sprite sheet's `frames_wh = N, cols, rows`
   is read from the game's own defs; each frame is cut out on the exact `w // cols` grid the
   engine samples, upscaled alone, and reassembled — so detail never smears across frame
@@ -210,6 +223,13 @@ upscaled PNG":
   smooth continuous outline instead of a blocky (or merely blurry) one. Each result is
   coverage-checked against the source mask and falls back to a faithful LANCZOS edge if the
   trace drifts, so a sprite can never come out stretched or clipped.
+
+  ![Edge de-jagging](docs/images/edge-dejag.png)
+
+  *Zoomed 3× with nearest-neighbour, so these are real output pixels. Note that the middle
+  column is already GAN-upscaled — the interior is sharp, but the 1-bit key leaves the
+  silhouette a staircase. Simply blurring that edge would only trade a sharp staircase for a
+  soft one; tracing it produces an actual curve.*
 - **FP16 inference** dispatches conv/matmul to the RX 7900 XTX's RDNA3 **WMMA** matrix cores;
   the default model is attention-free (Flash-Attention isn't a win on gfx1100).
 - **Every output is verified.** A correct 4× result box-downscaled back to source size
