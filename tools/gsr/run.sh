@@ -16,7 +16,8 @@
 #   tools/gsr/run.sh
 # Env:
 #   GSR_MODEL   model basename under tools/gsr/models/  (default: 4x-UltraSharpV2_Lite)
-#               4x-UltraSharpV2       — DAT2, max quality, slower (attention)
+#               4x-UltraSharpV2       — DAT2, max quality, slower (attention, and
+#                                       runs in FP32: it overflows FP16)
 #               4x-UltraSharpV2_Lite  — RealPLKSR, crisp + fast on gfx1100 (default)
 #   HF_TOKEN    HuggingFace token, used only if a model file is missing.
 #   GSR_IMAGE   docker image tag (default: jng-gsr:rocm7)
@@ -24,6 +25,39 @@
 #               so an APU's integrated graphics is never used).
 #   GSR_CHUNK   if set, process at most this many new images per container run
 #               (each chunk gets a fresh HIP context; not needed normally).
+#
+# Detail preservation (see the block comment in build_hd_gsr.py — these exist
+# because the model, being trained to remove noise, was erasing 2-4px rivets,
+# bolts and baked-in lettering and inventing smooth surfaces over them):
+#   GSR_PRESCALE  NEAREST-upscale each image this much before the model and
+#                 BOX-downscale after (default 2, 1 disables). Costs P^2 in model
+#                 pixels. Both the plain and prescaled results are produced and
+#                 the better one is kept PER IMAGE, so this is a ceiling, not a
+#                 forced setting.
+#   GSR_INJECT    1 (default) — add the source's own fine structure back on top
+#                 of the model output, at a strength solved per image so the
+#                 result's gradient energy matches the source's. 0 disables.
+#   GSR_ENSEMBLE  aggregate N dihedral orientations (median) to cancel
+#                 direction-dependent smearing. Default 1 (off); 8 costs 8x and
+#                 the prescale already removes most of that artifact.
+#   GSR_FP32      1 forces full precision (normally auto-detected per model).
+#
+# Throughput / tiling:
+#   GSR_TILE      max model-INPUT side before an image is tiled (default 512).
+#                 Raising this to use more VRAM makes it SLOWER, not faster —
+#                 measured 300s vs 68s vs 35s for tile 2048/512/256 on the same
+#                 large level art. Leave it alone.
+#   GSR_PAD       context kept around each tile (default 64). RealPLKSR's large
+#                 kernels need more than the old 16, which left faint seams.
+#   GSR_BATCH_PX  input pixels per forward pass (default: sized from free VRAM).
+#                 Mostly matters for sheets with many same-sized frames, which
+#                 then go through in one batch. Backs off automatically on OOM.
+#   GSR_BUCKET    1 (default) — round every model input up to one of ~250 fixed
+#                 shapes so MIOpen stops re-selecting kernels for each new sprite
+#                 size. Measured on 24 forwards of equal total pixels: same shape
+#                 0.042s each, all-different shapes 1.263s each — a 30x penalty
+#                 for shape churn alone. Costs ~5% wasted pixels on padding and
+#                 changes output by at most 2/255 (fp16 noise). 0 only for A/B.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -84,6 +118,13 @@ run_worker(){   # extra args -> build_hd_gsr.py
     --security-opt seccomp=unconfined --shm-size=8g \
     -v "$REPO":/work -w /work \
     -e GSR_MODEL="$MODEL" -e GSR_AA="$GSR_AA" ${GSR_TILE:+-e GSR_TILE="$GSR_TILE"} \
+    ${GSR_BATCH_PX:+-e GSR_BATCH_PX="$GSR_BATCH_PX"} ${GSR_PAD:+-e GSR_PAD="$GSR_PAD"} \
+    ${GSR_BUCKET:+-e GSR_BUCKET="$GSR_BUCKET"} \
+    ${GSR_PRESCALE:+-e GSR_PRESCALE="$GSR_PRESCALE"} \
+    ${GSR_INJECT:+-e GSR_INJECT="$GSR_INJECT"} \
+    ${GSR_ENSEMBLE:+-e GSR_ENSEMBLE="$GSR_ENSEMBLE"} \
+    ${GSR_FIDELITY_MARGIN:+-e GSR_FIDELITY_MARGIN="$GSR_FIDELITY_MARGIN"} \
+    ${GSR_FP32:+-e GSR_FP32="$GSR_FP32"} \
     -e HIP_VISIBLE_DEVICES="$GSR_GPU" \
     -e MIOPEN_USER_DB_PATH=/tmp/miopen -e MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen \
     "$IMAGE" python tools/gsr/build_hd_gsr.py "$@"

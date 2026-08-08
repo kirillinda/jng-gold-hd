@@ -13,6 +13,8 @@ upscaled/
 upscaled_gsr/
 build/
 dist/
+# Scratch output from tools/gsr/lab.py (A/B comparison sheets).
+lab/
 
 # GSR (GPU super-resolution) model weights — large, fetched from HuggingFace.
 tools/gsr/models/

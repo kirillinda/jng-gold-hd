@@ -16,6 +16,10 @@
 #   GSR_MODEL      GSR model basename (default: 4x-UltraSharpV2_Lite).
 #   GSR_AA         1 (default) — de-jag sprite silhouettes; 0 for hard 1-bit edges.
 #   GSR_GPU        HIP device index (default: auto-detect the discrete GPU).
+#   GSR_PRESCALE   scale-match before the model, to stop it erasing 2-4px detail
+#                  (default 2; 1 disables). See tools/gsr/run.sh for the rest of
+#                  the detail-preservation knobs.
+#   GSR_INJECT     1 (default) — restore fine structure the model removed.
 #   HF_TOKEN       HuggingFace token, only needed the first time to fetch weights.
 #
 # What it does (numbers match the section headers below):
