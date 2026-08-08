@@ -44,7 +44,7 @@ What makes this correct for a 20-year-old sprite engine (not just "run a model")
 
 Output cached per model under upscaled_gsr/<model>/ and packed into build/hd.dat.
 """
-import os, sys, io, re, glob, json, time, shutil, argparse
+import os, sys, io, re, glob, json, time, shutil, argparse, subprocess, tempfile
 import numpy as np
 from PIL import Image, ImageFilter
 
@@ -58,8 +58,17 @@ MAGENTA = (255, 0, 255)
 SCALE = 4
 MODEL_NAME = os.environ.get("GSR_MODEL", "4x-UltraSharpV2_Lite")
 MODEL_PATH = os.path.join(HERE, "models", MODEL_NAME + ".safetensors")
-CACHE = os.path.join(config.REPO, "upscaled_gsr", MODEL_NAME)
 LOGICAL = config.LOGICAL
+
+# Anti-alias sprite edges. The game keys magenta -> fully-transparent (1-bit), so
+# the model's crisp interior meets a hard, staircased silhouette. With AA on we
+# instead deliver magenta sprites as a real smooth-alpha 32-bit TGA (bled colour +
+# a de-jagged coverage alpha, see dejag_alpha): the engine alpha-blends it (same
+# path the .tga fog sprites use, via its IMG_LoadTGA_RW fallback), so edges are
+# smooth. Separate cache dir so AA and legacy 1-bit outputs don't collide.
+# Default on, matching run.sh, so a direct invocation builds the same archive.
+AA = os.environ.get("GSR_AA", "1") == "1"
+CACHE = os.path.join(config.REPO, "upscaled_gsr", MODEL_NAME + ("_aa" if AA else ""))
 
 IMG_EXT = (".bmp", ".tga", ".jpg", ".jpeg", ".gif")
 # 4:3 full-screen menu art that must be fitted into the 16:9 logical screen.
@@ -165,6 +174,49 @@ def lanczos_alpha(a, scale=SCALE):
     im = Image.fromarray(a, "L")
     return np.array(im.resize((a.shape[1] * scale, a.shape[0] * scale), Image.LANCZOS))
 
+
+def _run(cmd):
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def dejag_alpha(a, scale=SCALE, alphamax=1.0, turd=2):
+    """Turn a 1-bit color-key silhouette into a SMOOTH, continuous, anti-aliased
+    edge (not a blurred staircase). potrace vectorises the low-res mask into
+    Bezier curves — deliberately replacing the pixel staircase with smooth, but
+    corner-aware, outlines — and we rasterise that at `scale`x with coverage AA.
+    `a` is a 0/255 uint8 mask; returns a `scale`x uint8 alpha. Falls back to
+    LANCZOS if potrace/rsvg are unavailable or error out."""
+    h, w = a.shape
+    H, W = h * scale, w * scale
+    m = a > 127
+    if not m.any():
+        return np.zeros((H, W), np.uint8)
+    if m.all():
+        return np.full((H, W), 255, np.uint8)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            pbm, svg, png = td + "/m.pbm", td + "/m.svg", td + "/m.png"
+            Image.fromarray(np.where(m, 0, 255).astype(np.uint8), "L").save(pbm)  # sprite=black
+            # NO --tight: it crops the SVG to the shape bbox, so rsvg then rescales a
+            # small part up to the full canvas (a nose/engine balloons into a stretched
+            # blob). Keep the full-image coordinate frame so position/scale stay 1:1.
+            _run(["potrace", pbm, "-s", "-o", svg,
+                  f"--alphamax={alphamax}", f"--turdsize={turd}"])
+            _run(["rsvg-convert", "-w", str(W), "-h", str(H), "-b", "white", "-o", png, svg])
+            g = np.asarray(Image.open(png).convert("L"))
+        out = (255 - g).astype(np.uint8)                 # black shape -> opaque
+        if out.shape != (H, W):
+            out = resize_exact(out, H, W)
+        # Safety: if the vectorised silhouette drifts too far from the original
+        # coverage (tiny/thin sprites potrace can't fit well), keep the faithful
+        # LANCZOS edge instead — a correct shape beats a smooth-but-wrong one.
+        oc = m.mean(); nc = (out > 127).mean()
+        if oc > 0 and not (0.8 <= nc / oc <= 1.25):
+            return lanczos_alpha(a, scale)
+        return out
+    except Exception:
+        return lanczos_alpha(a, scale)
+
 # --------------------------------------------------------------------------- #
 #  the model
 # --------------------------------------------------------------------------- #
@@ -190,13 +242,18 @@ class Upscaler:
         torch.backends.cudnn.benchmark = os.environ.get("GSR_BENCHMARK", "0") == "1"
         self.tile = int(os.environ.get("GSR_TILE", "512"))   # max input side before tiling
         self.pad = 16
-        # Over a long batch the ROCm/MIOpen conv path occasionally emits a garbage
-        # tile (VRAM fragmentation under sustained mixed sizes — reproduces mid-run,
-        # never in isolation). A correct 4x result, box-downscaled to the source, is
-        # ~identical to it (err ~1-3/255); garbage differs wildly (err ~37-59). So we
-        # verify every output, and on failure flush VRAM + retry, then fall back to
-        # LANCZOS — no garbage can ever reach the archive.
-        self.garbage_thresh = float(os.environ.get("GSR_GARBAGE_THRESH", "15"))
+        # Cheap correctness check on every output. This started as a workaround for
+        # a 15%-of-images garbage rate that turned out to be self-inflicted (an
+        # expandable_segments allocator setting we no longer set — see Dockerfile);
+        # with that fixed the observed rate is ~0. It stays as a guard, because a
+        # silently-wrong tile would otherwise be baked into the shipped archive.
+        # A correct 4x result, box-downscaled to the source, is ~identical to it
+        # (err ~1-3/255); garbage differs wildly (err ~40-160). On failure we flush
+        # VRAM + retry, then fall back to LANCZOS.
+        # 25: measured legitimate worst case is 15.2 (assets/DATA/enemy/alien/worm1b.bmp,
+        # deterministic across runs — a genuinely hard image, not corruption), real
+        # garbage is 40+. 15 was too tight and needlessly LANCZOS'd worm1b.
+        self.garbage_thresh = float(os.environ.get("GSR_GARBAGE_THRESH", "25"))
         self.retries = self.fallbacks = 0
         name = self.torch.cuda.get_device_name(0) if self.dev == "cuda" else "CPU"
         print(f"[gsr] model={os.path.basename(path)} dev={self.dev} half={self.half} "
@@ -407,12 +464,16 @@ def process_image(rel, path, up, sheet_map):
         else:
             rgb_cv[Y0:Y0 + ch, X0:X0 + cw] = rgb4
             if kind in ("magenta", "rgba"):
-                # alpha always LANCZOS: a hard key/edge must not be model-hallucinated.
-                a_cv[Y0:Y0 + ch, X0:X0 + cw] = resize_exact(lanczos_alpha(alpha), ch, cw)
+                # magenta is a 1-bit color-key silhouette -> de-jag into a smooth
+                # continuous edge when AA is on; rgba already has soft model alpha.
+                a4 = dejag_alpha(alpha) if (AA and kind == "magenta") else lanczos_alpha(alpha)
+                a_cv[Y0:Y0 + ch, X0:X0 + cw] = resize_exact(a4, ch, cw)
 
     # --- finalize to the game's container/format ---
     if kind == "magenta":
-        rgb_cv[a_cv < 128] = MAGENTA
+        if AA:                                       # smooth-alpha TGA (anti-aliased edge)
+            return enc(Image.fromarray(np.dstack([rgb_cv, a_cv]), "RGBA"), "TGA"), "TGA"
+        rgb_cv[a_cv < 128] = MAGENTA                 # legacy 1-bit color-key BMP
         return enc(Image.fromarray(rgb_cv, "RGB"), "BMP"), "BMP"
     if kind == "rgba":
         rgba = np.dstack([rgb_cv, a_cv])

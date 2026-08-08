@@ -8,9 +8,9 @@
 # bind-mounted so the container reads assets/ and writes build/hd.dat in place.
 #
 # Resumable: every image is cached under upscaled_gsr/<model>/, so if the run is
-# interrupted (e.g. a GPU hiccup) just run this again — it skips what's done. The
-# worker also self-heals: it detects and repairs any corrupt tile the ROCm conv
-# path emits (retry, then LANCZOS) — see build_hd_gsr.py — so no garbage is packed.
+# interrupted just run this again — it skips what's done. The worker also verifies
+# every output and repairs anything implausible (retry, then LANCZOS), so no
+# garbage can be packed — see build_hd_gsr.py.
 #
 # Usage:
 #   tools/gsr/run.sh
@@ -20,9 +20,10 @@
 #               4x-UltraSharpV2_Lite  — RealPLKSR, crisp + fast on gfx1100 (default)
 #   HF_TOKEN    HuggingFace token, used only if a model file is missing.
 #   GSR_IMAGE   docker image tag (default: jng-gsr:rocm7)
+#   GSR_GPU     HIP device index to pin to (default: auto-detected gfx1100 dGPU,
+#               so an APU's integrated graphics is never used).
 #   GSR_CHUNK   if set, process at most this many new images per container run
-#               (a wrapper for a fresh GPU context; only needed if your card
-#               degrades/crashes under long sustained ROCm load).
+#               (each chunk gets a fresh HIP context; not needed normally).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -30,7 +31,8 @@ GSR_DIR="$REPO/tools/gsr"
 MODEL="${GSR_MODEL:-4x-UltraSharpV2_Lite}"
 IMAGE="${GSR_IMAGE:-jng-gsr:rocm7}"
 HF_REPO="Kim2091/UltraSharpV2"
-CACHE="$REPO/upscaled_gsr/$MODEL"
+GSR_AA="${GSR_AA:-1}"                       # de-jagged sprite silhouettes (potrace)
+CACHE="$REPO/upscaled_gsr/$MODEL$([ "$GSR_AA" = 1 ] && echo _aa)"
 
 log(){ printf '\n\033[1;35m[gsr] %s\033[0m\n' "$*"; }
 die(){ printf '\033[1;31m[gsr] error: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -57,13 +59,32 @@ docker build -t "$IMAGE" "$GSR_DIR"
 # render/video groups (pass numeric GIDs — the names don't exist in the image).
 # MIOpen db -> /tmp (its permission-fixup fails on a bind mount).
 RENDER_GID="$(getent group render | cut -d: -f3)"; VIDEO_GID="$(getent group video | cut -d: -f3)"
+
+# Pin the workload to the discrete GPU. /dev/dri exposes every render node, so a
+# machine with an APU (this one: Ryzen Raphael gfx1036) presents a second ROCm
+# agent. Find the gfx1100 KFD node and pin to it, so we can never dispatch onto
+# integrated graphics — which also shares system RAM with the desktop.
+GSR_GPU="${GSR_GPU:-$(python3 - <<'PY' 2>/dev/null || echo 0
+import glob, re
+for p in sorted(glob.glob('/sys/class/kfd/kfd/topology/nodes/*/properties')):
+    if re.search(r'^gfx_target_version 110000$', open(p).read(), re.M):
+        # HIP indexes GPU agents in KFD node order, skipping the CPU node.
+        n = int(p.split('/')[-2])
+        gpus = [int(q.split('/')[-2]) for q in sorted(glob.glob('/sys/class/kfd/kfd/topology/nodes/*/properties'))
+                if 'gfx_target_version 0\n' not in open(q).read()]
+        print(sorted(gpus).index(n)); break
+else:
+    print(0)
+PY
+)}"
 run_worker(){   # extra args -> build_hd_gsr.py
   docker run --rm \
     --device=/dev/kfd --device=/dev/dri \
     ${RENDER_GID:+--group-add "$RENDER_GID"} ${VIDEO_GID:+--group-add "$VIDEO_GID"} \
     --security-opt seccomp=unconfined --shm-size=8g \
     -v "$REPO":/work -w /work \
-    -e GSR_MODEL="$MODEL" ${GSR_TILE:+-e GSR_TILE="$GSR_TILE"} -e HSA_OVERRIDE_GFX_VERSION=11.0.0 \
+    -e GSR_MODEL="$MODEL" -e GSR_AA="$GSR_AA" ${GSR_TILE:+-e GSR_TILE="$GSR_TILE"} \
+    -e HIP_VISIBLE_DEVICES="$GSR_GPU" \
     -e MIOPEN_USER_DB_PATH=/tmp/miopen -e MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen \
     "$IMAGE" python tools/gsr/build_hd_gsr.py "$@"
 }
@@ -85,7 +106,7 @@ else                                        # default: one pass (re-run to resum
 fi
 
 c="$(count)"
-[ "$c" -ge "$total" ] || die "generation incomplete ($c / $total) — the GPU may have hiccuped; run this again to resume from cache"
+[ "$c" -ge "$total" ] || die "generation incomplete ($c / $total) — run this again to resume from cache"
 
 # 5. Pack hd.dat (everything cached now; no GPU needed) ----------------------
 log "Packing build/hd.dat"

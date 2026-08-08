@@ -156,6 +156,8 @@ tools/
     Dockerfile           ROCm 7.x + PyTorch + spandrel image (self-contained)
     build_hd_gsr.py      sheet-aware GAN upscaler -> build/hd.dat
     run.sh               build the image + run the upscale in the container
+    verify_hd.py         check hd.dat: valid archive, every image exactly 4x
+    scan_quality.py      check hd.dat for upscale corruption (alpha-aware)
     models/              GAN model weights (git-ignored; fetched from HuggingFace)
   patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
   patch_widescreen.py    binary-patch the leftover hardcoded 800x600 gameplay bounds (ELF)
@@ -202,19 +204,40 @@ upscaled PNG":
   edges scaled faithfully rather than hallucinated.
 - **Text is not AI'd.** Font/glyph sheets and HUD digits are scaled with LANCZOS (no letter
   warping) but still 4×'d, and the HTML manual is left at 1× (it isn't a game texture).
+- **Sprite edges are de-jagged** (`GSR_AA=1`, on by default). The originals use a 1-bit
+  magenta colour key, so a 4× upscale turns every edge stair-step into a 4×4 block. The
+  silhouette is vectorised with **potrace** and re-rasterised with antialiasing, giving a
+  smooth continuous outline instead of a blocky (or merely blurry) one. Each result is
+  coverage-checked against the source mask and falls back to a faithful LANCZOS edge if the
+  trace drifts, so a sprite can never come out stretched or clipped.
 - **FP16 inference** dispatches conv/matmul to the RX 7900 XTX's RDNA3 **WMMA** matrix cores;
   the default model is attention-free (Flash-Attention isn't a win on gfx1100).
+- **Every output is verified.** A correct 4× result box-downscaled back to source size
+  matches it closely; anything implausible is retried and then LANCZOS'd, so no corrupt
+  tile can reach the archive. `tools/gsr/scan_quality.py` re-checks the packed `hd.dat`.
 
 Build it (the default path in `build.sh`), or run it directly:
 
 ```bash
 GSR_MODEL=4x-UltraSharpV2_Lite tools/gsr/run.sh     # crisp + fast (default)
-GSR_MODEL=4x-UltraSharpV2      tools/gsr/run.sh      # DAT2, max quality, slower
+GSR_MODEL=4x-UltraSharpV2      tools/gsr/run.sh     # DAT2, max quality, slower
+GSR_AA=0                       tools/gsr/run.sh     # hard 1-bit edges (no de-jag)
 ```
 
 Requirements: **Docker** and an **AMD GPU with ROCm** (developed on a 7900 XTX). Model
 weights are fetched once from HuggingFace (set `HF_TOKEN` if you hit rate limits). To fall
 back to the original Vulkan/ncnn upscaler on non-ROCm systems, run `HD_BACKEND=ncnn ./build.sh`.
+
+On a machine with both a discrete GPU and an APU, `/dev/dri` exposes both to the container;
+`run.sh` auto-detects the discrete one and pins `HIP_VISIBLE_DEVICES` to it. Override with
+`GSR_GPU=<index>` if the detection picks wrong.
+
+> **Note for ROCm hackers:** do not set `PYTORCH_HIP_ALLOC_CONF=expandable_segments:True`
+> here. It looks ideal for a workload of thousands of differently-sized images, but on
+> ROCm 7.2.4 it corrupted ~15% of outputs (NaN/Inf, and bogus reduction results) versus
+> ~0% with the stock caching allocator. Likewise `HSA_OVERRIDE_GFX_VERSION` applies to
+> *every* visible agent, so on an APU box it makes the integrated GPU masquerade as the
+> discrete one — pin the device instead.
 
 ## How it works (short version)
 
