@@ -289,7 +289,12 @@ sides carry the same bias, but the absolute numbers understate small sprites.
   Both candidates (plain and scale-matched) are generated and the better one is kept for each
   image, because scale matching is a large win on detailed art but a small loss on smooth
   glow/flare sprites where there was no fine structure at risk. The choice is made by
-  measurement — no classifier, no per-object models, no seams. `tools/gsr/lab.py` renders any
+  measurement — no classifier, no per-object models, no seams. One veto runs at output
+  resolution, where downscale-based scores are blind: on heavily dithered art the
+  scale-matched pass "preserves structure" by resynthesising the dither as wiry crosshatch
+  scribble (measured: 1.18–1.29× the plain candidate's pixel-scale gradient energy, vs
+  0.88–1.09× everywhere scale matching genuinely helps), so a candidate that far above the
+  plain baseline is rejected as inventing texture rather than keeping it. `tools/gsr/lab.py` renders any
   set of settings side by side with scores, and `tools/gsr/scan_detail.py` ranks the whole
   archive by how much fine structure survived.
 
