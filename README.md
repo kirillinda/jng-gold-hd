@@ -339,10 +339,14 @@ sides carry the same bias, but the absolute numbers understate small sprites.
   box-downscaled back to source size matches it closely; anything implausible is retried
   and then LANCZOS'd. The check runs per 16px block as well as globally, because a
   localized garbage blob in a large image moves the global mean by ~1/255 — that gap once
-  let "rainbow noise" ship in level tilesets whose deep magenta-key slabs outran the
-  colour bleed's old 24px reach (the bleed now completes with an exact
-  nearest-real-pixel fill, whatever the keyed area's size). `tools/gsr/scan_quality.py`
-  re-checks the packed `hd.dat`.
+  let "rainbow noise" ship in level tilesets (the colour bleed's old 24px reach was one
+  cause; it now completes with an exact nearest-real-pixel fill, whatever the keyed
+  area's size). The other cause was the nearest-neighbour 2× prescale: on heavily
+  dithered art it turns the pixel dither into a razor-sharp 2px checkerboard the model
+  resonates on, painting saturated rainbow moiré. Rejected outputs are therefore redone
+  with a bilinear prescale — which removes the bait and, measured on the affected
+  tilesets, passes verification with a real GAN upscale — before LANCZOS is ever
+  accepted. `tools/gsr/scan_quality.py` re-checks the packed `hd.dat`.
 - **Inputs are shape-bucketed.** Every sprite is a different size, so the model used to see
   a brand-new tensor shape on nearly every call (1555 distinct shapes across the asset set)
   and MIOpen re-selected kernels each time. Measured on 24 forwards of identical total

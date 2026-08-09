@@ -474,7 +474,7 @@ class Upscaler:
         # deterministic across runs — a genuinely hard image, not corruption), real
         # garbage is 40+. 15 was too tight and needlessly LANCZOS'd worm1b.
         self.garbage_thresh = float(os.environ.get("GSR_GARBAGE_THRESH", "25"))
-        self.retries = self.fallbacks = 0
+        self.retries = self.fallbacks = self.soft_saves = 0
         # Detail preservation — see the block comment above. prescale=2 is the
         # sweet spot: it fixes the structure loss for 4x the model pixels, where
         # prescale=3 costs 9x for a marginal further gain. ensemble>1 aggregates
@@ -721,9 +721,11 @@ class Upscaler:
         return [self._tiled_one(a) if max(a.shape[:2]) > self.tile
                 else self._batch_same_size([a])[0] for a in arrs]
 
-    def _up_many_guarded(self, arrs):
+    def _up_many_guarded(self, arrs, failed=None):
         """As _up_many_raw, but verifies each output and repairs any garbage tile
-        (flush VRAM + retry once; LANCZOS as a last resort). Guarantees no garbage."""
+        (flush VRAM + retry once; LANCZOS as a last resort). Guarantees no garbage.
+        Indices that ended up as LANCZOS are appended to `failed` so the caller
+        can try a better repair than a plain resize."""
         outs = self._up_many_raw(arrs)
         bad = [i for i, (a, o) in enumerate(zip(arrs, outs)) if not self._plausible(a, o)]
         if bad:
@@ -734,6 +736,8 @@ class Upscaler:
                     self.retries += 1
                 else:
                     o = lanczos_rgb(arrs[i]); self.fallbacks += 1
+                    if failed is not None:
+                        failed.append(i)
                 outs[i] = o
         return outs
 
@@ -761,7 +765,24 @@ class Upscaler:
             outs = [np.clip(np.median(np.stack(t).astype(np.float32), 0), 0, 255)
                     .astype(np.uint8) for t in zip(*acc)]
         else:
-            outs = self._up_many_guarded(ins)
+            failed = []
+            outs = self._up_many_guarded(ins, failed)
+            # A nearest prescale turns pixel dither into a razor-sharp 2px
+            # checkerboard, and on some dithered art the model resonates on it
+            # and paints saturated rainbow moire (level_cannon/19_main's lamp,
+            # water/bigsub's camo). A soft prescale removes the bait, so before
+            # accepting a LANCZOS fallback, redo just the failed images with a
+            # bilinear prescale.
+            if failed and p > 1 and self.prefilter != "bilinear":
+                for i in failed:
+                    a = arrs[i]
+                    soft = np.asarray(Image.fromarray(a, "RGB").resize(
+                        (a.shape[1] * p, a.shape[0] * p), Image.BILINEAR), np.uint8)
+                    o = self._up_many_raw([soft])[0]
+                    if self._plausible(soft, o):
+                        outs[i] = o
+                        self.fallbacks -= 1
+                        self.soft_saves += 1
 
         if p > 1:                                   # back down to exactly 4x
             outs = [np.asarray(Image.fromarray(o, "RGB").resize(
@@ -1102,7 +1123,8 @@ def main():
             print(f"[gsr] {done}/{len(need)}  {dt:.0f}s  {done/dt:.1f} img/s{extra}", flush=True)
 
     dt = time.time() - t0
-    rf = f"  (garbage repaired: {up.retries} retries, {up.fallbacks} LANCZOS fallbacks)" if up else ""
+    rf = (f"  (garbage repaired: {up.retries} retries, {up.soft_saves} soft-prescale saves, "
+          f"{up.fallbacks} LANCZOS fallbacks)") if up else ""
     print(f"[gsr] processed {done} ({skipped} left-vanilla) in {dt:.0f}s{rf}", flush=True)
     if up and sum(up.picked):
         pl, pr = up.picked
