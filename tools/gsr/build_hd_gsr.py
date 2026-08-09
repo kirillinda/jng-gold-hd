@@ -188,7 +188,18 @@ def classify(im):
 
 def bleed(rgb, transparent, iters=24):
     """Fill transparent pixels from filled neighbours so upscaling never blends
-    toward the key colour (no halos)."""
+    toward the key colour (no halos).
+
+    The fill must be COMPLETE, whatever the keyed area's size. The averaging loop
+    below covers `iters` px from the nearest real pixel -- plenty for sprite
+    fringes, but level tilesets carry key SLABS well over 100 px deep. Their cores
+    used to reach the model as raw magenta, and the GAN sprayed saturated chroma
+    noise over everything within its receptive field (the level_cannon "rainbow
+    blob" corruption -- looks exactly like memory garbage, but it is the model
+    reacting to a quarter-screen of 255,0,255). Anything the loop did not reach is
+    finished with an exact nearest-real-pixel fill (distance-transform indices),
+    which has no depth limit.
+    """
     out = rgb.astype(np.float32)
     filled = ~transparent
     offs = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
@@ -203,6 +214,16 @@ def bleed(rgb, transparent, iters=24):
         new = (~filled) & (cnt > 0)
         out[new] = nb[new] / cnt[new][..., None]
         filled |= new
+    if not filled.all():
+        try:
+            from scipy.ndimage import distance_transform_edt
+            iy, ix = distance_transform_edt(~filled, return_distances=False,
+                                            return_indices=True)
+            out = np.where(filled[..., None], out, out[iy, ix])
+        except ImportError:                     # no scipy: converge the loop
+            h, w = out.shape[:2]
+            return bleed(np.clip(out, 0, 255).astype(np.uint8), ~filled,
+                         iters=max(h, w))
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -498,10 +519,27 @@ class Upscaler:
             self.torch.cuda.empty_cache()
 
     def _plausible(self, src, out):
-        """A real 4x SR, downscaled back, matches the source in the low frequencies."""
+        """A real 4x SR, downscaled back, matches the source in the low frequencies.
+
+        Checked globally AND per 16px block: a saturated garbage blob covering a
+        few percent of a large image moves the global mean by ~1/255 and sailed
+        through the old check (the level_cannon rainbow blobs shipped that way).
+        Chroma is compared blockwise -- garbage is always wildly off in colour,
+        while legitimate sharpening shifts luminance far more than chroma."""
         h, w = src.shape[:2]
         down = np.asarray(Image.fromarray(out, "RGB").resize((w, h), Image.BOX), np.float32)
-        return np.abs(down - src.astype(np.float32)).mean() < self.garbage_thresh
+        s = src.astype(np.float32)
+        if np.abs(down - s).mean() >= self.garbage_thresh:
+            return False
+        bs = 16
+        bh, bw = h // bs, w // bs
+        if bh and bw:
+            dch = (np.abs((s[..., 0] - s[..., 1]) - (down[..., 0] - down[..., 1]))
+                   + np.abs((s[..., 2] - s[..., 1]) - (down[..., 2] - down[..., 1]))) / 2
+            blocks = dch[:bh * bs, :bw * bs].reshape(bh, bs, bw, bs).mean((1, 3))
+            if blocks.max() >= 25:              # corrupt blobs measure >=40; clean art <20
+                return False
+        return True
 
     _BYTES_PER_INPUT_PX = 768      # measured peak for the default model, fp16
 
