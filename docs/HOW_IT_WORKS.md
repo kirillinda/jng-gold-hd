@@ -10,7 +10,7 @@ Win32 debugger. Both are the same 32-bit RX engine on SDL2 + OpenGL.
 1. [The engine at a glance](#1-the-engine-at-a-glance)
 2. [The `.dat` archive format](#2-the-dat-archive-format)
 3. [The override overlay](#3-the-override-overlay)
-4. [Widescreen](#4-widescreen) — incl. [4a. 4:3 assumptions in the *code*](#4a-the-43-assumptions-the-config-change-does-not-fix) and [4b. in the *data*](#4b-the-43-assumptions-that-live-in-the-games-data)
+4. [Widescreen](#4-widescreen) — incl. [4a. 4:3 assumptions in the *code*](#4a-the-43-assumptions-the-config-change-does-not-fix), [4b. in the *data*](#4b-the-43-assumptions-that-live-in-the-games-data) and [4c. in every level's *spawn tables*](#4c-the-43-assumptions-in-every-levels-spawn-tables)
 5. [Why HD needs a binary patch](#5-why-hd-needs-a-binary-patch)
 6. [The binary patch](#6-the-binary-patch)
 7. [Transparency / color-key](#7-transparency--color-key)
@@ -241,6 +241,59 @@ The five data bugs, all measured on a 1067×600 logical screen:
    (`0,-20,800,-10` ×12 — at 1067 the right 267px would get no rain). Verified in the intro:
    721/803 spawns now land in 1067..1087, was 800..820. `level_zog`'s `650,0,660,520` matches
    neither pattern (650 is mid-screen even at 800), so it's left alone and reported.
+
+### 4c. The 4:3 assumptions in every level's spawn tables
+
+The intro fixes above are hand-authored; the same three 800-isms turn out to live in
+**every level's** enemy data. [`tools/scan_levels.py`](../tools/scan_levels.py) walks each
+level's `lvl.txt` includes, resolves its trigger/behavior/path namespace, and **simulates
+every starter → trigger → enemy → behavior chain twice** — once at the authored 800, once
+at the target width — flagging every chain whose outcome differs qualitatively.
+`make_widescreen_defs.py` turns the findings into line edits and re-scans until clean
+(the 800 reference always runs on pristine data, so "fixed" means "matches the authored
+margins" and the loop terminates exactly there). At width 800 the whole sweep is a
+byte-for-byte no-op.
+
+The engine facts the simulator is built on, all read out of the disassembly and then
+measured live under gdb:
+
+* `ParseNextStarter` fires when `scrollX + Width >= starter.x` and spawns at
+  **`starter.x − scrollX`** (`0x808485b`) — the right edge only once the level has
+  scrolled that far. `LoadStarter` **rejects the whole level** if starters are not
+  sorted by x ascending.
+* Trigger entries: relative `pos` is added to the spawn base; `absolute = 1` is screen
+  coords regardless of caller (`CTrigger::Execute 0x8083e13` skips the base add);
+  `absolute = 2` is world coords (scroll-subtracted) and is never touched.
+* Paths: relative nodes are deltas from the current position × `path_scale`/100 per
+  axis; when the node list runs out `CEnemy::NextNodePos` silently removes the enemy.
+* `behavior = X` inside an event hands the enemy off (timers restart); `ground >= 1`
+  drifts the sprite left with the level's `Scroll_speed`; `part_state.0 = 0` inside an
+  `<on_timer>` is the designers' idiom for a **time-based despawn** tuned to the length
+  of an 800-wide crossing.
+
+The classes found and fixed (all measured on 1067×600; 249 defs re-authored):
+
+| class | what broke at 1067 | fix |
+| --- | --- | --- |
+| LPOP | left-entry offsets (`pos ≤ −736`): rear-attackers spawned at x≈+167 instead of off-screen; also stalls `<on_screen_left>` activations that only fire when spawn x < 0 | `pos.x −= 267` |
+| RSTAGE | `absolute = 1` staging at 800..1050 (checkpoint lines, invader waves, race gates) now visibly on-screen | `pos.x += 267` |
+| SSTART | starters with x in [800, 1067) fire at t=0 and spawn **on-screen** (the shop test range's controller sits at exactly 800; `SCROLL_STOP` in level_spam would have frozen the level at load). 342 of 431 band starters are air/control chains | `starter.x += 267` → fires at the same *scroll position* as vanilla; ground/world-anchored starters stay (their spawn is a place, and the wider screen legitimately shows it); file re-sorted by x afterwards |
+| VANISH | final path reach tuned to an 800 crossing → removed mid-air (torpedoes at +67, kopters at +34…); diagonals and per-spawn random-speed variants (habitat asteroids: slow branches die by timer, fast by path) | `path_scale.x` extended so the death keeps its authored edge margin; diagonals scale y too (angle preserved); timer despawns retimed (habitats 22 s→28.68 s; USSI flyby 10.75 s→15.2 s) |
+| LIMIT | `path_limit` right-bounds at 1000/1050 killed things just inside the new right edge | bound `+= 267` |
+
+Child chains (spawned by a parent via `trigger.X`) are simulated from the worst-case
+parent staging (`Width + 200`, the shop target spawner) and get **reach extensions
+only** — extending a leftward crosser past the left edge is invisible, while retiming a
+child's timer could disturb scripted sequences (the endgame explosion, habitat death
+fragments); any extension that would newly reach one of the chain's own
+`part_state.0 = 0` timers is refused and reported. Hero-hunting, rotated and cyclic
+chains degrade to intervals/fuzzy and are listed for eyes-on review.
+
+Verified live under gdb (breakpoints on the silent-removal sites, positions logged):
+shop targets previously died at x≈+66 mid-screen, now at −201 — the vanilla margin;
+crossers exit at −103…−200; the engine's own left cull fires at −type width as always.
+`tools/scan_levels.py --timers` audits all 95 timer-despawn sites and their current
+values.
 
 ---
 
