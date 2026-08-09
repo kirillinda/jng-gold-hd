@@ -23,7 +23,11 @@ word i = (seed + i*0x732C2E17). The original routine only obfuscates the
 first `len>>2` "units" of each buffer (a quirk of the shipped code); this is
 replicated exactly so round-trips are byte-identical.
 """
-import struct, zlib, os
+import struct, zlib, os, threading
+try:
+    import numpy as _np          # optional: vectorises the XOR keystream (~50x)
+except ImportError:
+    _np = None
 
 KS_STEP = 0x732C2E17
 KEY_MUL = 0x17BC3
@@ -38,6 +42,7 @@ MASK = 0xFFFFFFFF
 #      as a fallback for machines that have liblzo2 but not the wheel.
 # Both speak the same LZO1X bitstream the game's own decompressor reads.
 _LZO_BACKEND = None
+_TLS = threading.local()
 
 try:
     import lzallright as _lzal          # cross-platform prebuilt wheel
@@ -51,7 +56,13 @@ try:
         return bytes(out)
 
     def lzo_compress(src: bytes) -> bytes:
-        return bytes(_lzc.compress(bytes(src)))
+        # Per-thread compressor: LZO keeps per-instance working memory, so the
+        # single module-level instance must not be shared across pack() threads.
+        tls = _TLS
+        c = getattr(tls, "lzc", None)
+        if c is None:
+            c = tls.lzc = _lzal.LZOCompressor()
+        return bytes(c.compress(bytes(src)))
 
 except ImportError:
     import ctypes, ctypes.util
@@ -91,7 +102,8 @@ except ImportError:
         return dst.raw[:dl.value]
 
 # ---- obfuscation -----------------------------------------------------------
-def xorbuf(buf: bytearray, seed: int):
+def _xorbuf_py(buf: bytearray, seed: int):
+    """Byte-exact transcription of the game's routine (reference / fallback)."""
     L = len(buf); wc = L >> 2; seed &= MASK
     if wc > 3:
         edi = wc; j = 0
@@ -109,6 +121,26 @@ def xorbuf(buf: bytearray, seed: int):
     else:
         for k in range(wc):
             buf[k] ^= ((seed + k * KS_STEP) & MASK) & 0xFF
+    return buf
+
+
+def xorbuf(buf: bytearray, seed: int):
+    """Same transform, vectorised. The pure-Python version does per-word
+    int.from_bytes over the whole payload (~1.4 GB for hd.dat), which alone
+    costs minutes of pack time; this is bit-identical (verified against
+    _xorbuf_py) and ~50x faster. Quirks preserved exactly: only the first
+    len>>2 'words' are touched, the last (len>>2)-4*ceil((wc-3)/4) words get
+    only their LOW BYTE XOR'd, and buffers under 16 bytes get the low-byte
+    treatment throughout."""
+    L = len(buf); wc = L >> 2; seed &= MASK
+    if _np is None or wc <= 3:
+        return _xorbuf_py(buf, seed)
+    nf = 4 * ((wc - 3 + 3) // 4)                  # words fully XOR'd (32-bit)
+    ks = (seed + _np.arange(nf, dtype=_np.uint64) * KS_STEP) & MASK
+    w = _np.frombuffer(buf, dtype='<u4', count=nf)
+    w ^= ks.astype('<u4')
+    for k in range(wc - nf):                      # 0-3 tail bytes, low-byte only
+        buf[nf*4 + k] ^= ((seed + (nf + k) * KS_STEP) & MASK) & 0xFF
     return buf
 
 # ---- archive ---------------------------------------------------------------
@@ -164,33 +196,51 @@ class DatArchive:
         return bytes(out)
 
 
-def pack(files: dict, out_path: str, magic: int = 0x30444800):
+def _pack_prep_entry(content: bytes):
+    """Compress + obfuscate one entry's blocks. Pure function of the content, so
+    entries can be prepared on a thread pool (both LZO back-ends release the GIL,
+    measured 5.3x at 8 threads). Returns (uncomp, [(block_bytes, cksum, clen)])
+    with the same per-block decisions as the original serial writer."""
+    content = bytes(content)
+    uncomp = len(content)
+    nblocks = (uncomp + BLOCK - 1) >> 15 if uncomp else 0
+    blocks = []
+    for i in range(nblocks):
+        chunk = content[i*BLOCK : i*BLOCK + min(BLOCK, uncomp - i*BLOCK)]
+        c = bytes(lzo_compress(chunk))
+        if len(c) >= BLOCK:                   # would overflow game's 0x8000 read buffer -> store raw
+            raw = bytearray(chunk) + bytes(BLOCK - len(chunk))   # pad to 0x8000; game uses only `want` bytes
+            xorbuf(raw, 0)
+            blocks.append((bytes(raw), zlib.adler32(bytes(raw), 0) & MASK, 0))  # comp=0 => raw
+        else:
+            xc = bytearray(c); xorbuf(xc, 0)  # block data XOR'd with seed 0
+            blocks.append((bytes(xc), zlib.adler32(c, 0) & MASK, len(c)))
+    return uncomp, blocks
+
+
+def pack(files: dict, out_path: str, magic: int = 0x30444800, workers: int = 0):
     """Write a JnG .dat archive. `files` maps archive path (either '/' or '\\'
     separators) -> bytes. Suitable as an override overlay listed first in Data.ini
-    (lookup is first-match-wins, so overlay entries win over jng.dat)."""
+    (lookup is first-match-wins, so overlay entries win over jng.dat).
+
+    Block compression runs on a thread pool; assembly is serial and reproduces
+    the byte layout of the original single-threaded writer exactly (verified by
+    digest on a full 1854-entry archive)."""
+    from concurrent.futures import ThreadPoolExecutor
+    names = list(files)
+    with ThreadPoolExecutor(workers or min(16, os.cpu_count() or 4)) as ex:
+        prepped = list(ex.map(lambda n: _pack_prep_entry(files[n]), names))
+
     out = bytearray(16)  # header filled in later
     recs = []            # (name, uncomp, bt_offset)
-    for name, content in files.items():
-        content = bytes(content)
-        uncomp = len(content)
-        nblocks = (uncomp + BLOCK - 1) >> 15 if uncomp else 0
+    for name, (uncomp, blocks) in zip(names, prepped):
         bt_offset = len(out)
-        table_pos = len(out)
-        out += b'\x00' * (nblocks * 12)     # reserve block table
+        out += b'\x00' * (len(blocks) * 12)  # reserve block table
         table = bytearray()
-        for i in range(nblocks):
-            chunk = content[i*BLOCK : i*BLOCK + min(BLOCK, uncomp - i*BLOCK)]
-            c = bytes(lzo_compress(chunk))
-            if len(c) >= BLOCK:               # would overflow game's 0x8000 read buffer -> store raw
-                raw = bytearray(chunk) + bytes(BLOCK - len(chunk))   # pad to 0x8000; game uses only `want` bytes
-                xorbuf(raw, 0)
-                delta = len(out); out += raw
-                table += struct.pack('<IIHH', delta, zlib.adler32(bytes(raw), 0) & MASK, 0, 0)  # comp=0 => raw
-            else:
-                xc = bytearray(c); xorbuf(xc, 0)  # block data XOR'd with seed 0
-                delta = len(out); out += xc
-                table += struct.pack('<IIHH', delta, zlib.adler32(c, 0) & MASK, len(c), 0)
-        out[table_pos:table_pos + len(table)] = table
+        for data, cksum, clen in blocks:
+            delta = len(out); out += data
+            table += struct.pack('<IIHH', delta, cksum, clen, 0)
+        out[bt_offset:bt_offset + len(table)] = table
         recs.append((name, uncomp, bt_offset))
 
     index_offset = len(out)

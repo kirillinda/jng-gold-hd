@@ -335,13 +335,28 @@ def _run(cmd):
     subprocess.run(cmd, check=True, capture_output=True)
 
 
-def dejag_alpha(a, scale=SCALE, alphamax=1.0, turd=2):
+# potrace's corner threshold. This is NOT a cosmetic knob: at potrace's default
+# of 1.0 the tracer treats almost every corner as a curve, which turned
+# DATA/gui/sideex.bmp's SQUARE icon ring into a circle and its straight stem into
+# an S-bend. Measured shape error (traced coverage box-downscaled vs the source
+# mask) falls monotonically as it drops — but 0 means "all corners, no curves",
+# which throws away the de-jagging this function exists for. 0.6 is where genuine
+# right angles survive while an organic hull (air.zeppelin) still traces smooth:
+#   asset                alphamax 1.0    0.6    0.0
+#   gui/sideex.bmp           0.0228  0.0135  0.0126   (square ring -> circle at 1.0)
+#   air.zeppelin.bmp         0.0139  0.0128  0.0109   (looks smooth at all three)
+DEJAG_ALPHAMAX = float(os.environ.get("GSR_DEJAG_ALPHAMAX", "0.6"))
+
+
+def dejag_alpha(a, scale=SCALE, alphamax=None, turd=2):
     """Turn a 1-bit color-key silhouette into a SMOOTH, continuous, anti-aliased
     edge (not a blurred staircase). potrace vectorises the low-res mask into
     Bezier curves — deliberately replacing the pixel staircase with smooth, but
     corner-aware, outlines — and we rasterise that at `scale`x with coverage AA.
     `a` is a 0/255 uint8 mask; returns a `scale`x uint8 alpha. Falls back to
     LANCZOS if potrace/rsvg are unavailable or error out."""
+    if alphamax is None:
+        alphamax = DEJAG_ALPHAMAX
     h, w = a.shape
     H, W = h * scale, w * scale
     m = a > 127
@@ -458,9 +473,20 @@ class Upscaler:
         # before it is rejected regardless of how much structure it preserves.
         self.fidelity_margin = float(os.environ.get("GSR_FIDELITY_MARGIN", "1.5"))
         self.picked = [0, 0]                          # [plain, prescaled]
+        # Skip the prescaled pass when the plain one already kept the structure.
+        # Measured: prescale=2 costs ~80% of all GPU time (40 images: 17.9s plain
+        # only vs 47.2s computing both), so not computing it where it cannot help
+        # is the largest saving available.
+        self.shortcut_ret = float(os.environ.get("GSR_SHORTCUT_RET", "0.95"))
+        self.shortcut = 0
         # Shape bucketing (see DIM_LADDER). GSR_BUCKET=0 disables it, which is
         # only useful for A/B-ing the effect — it is a large loss.
         self.bucket = os.environ.get("GSR_BUCKET", "1") == "1"
+        # NHWC. MIOpen prefers it for many convolutions; whether it actually wins
+        # on gfx1100 for this model is measured, not assumed.
+        self.channels_last = os.environ.get("GSR_CHANNELS_LAST", "0") == "1"
+        if self.channels_last:
+            md.model.to(memory_format=torch.channels_last)
         name = self.torch.cuda.get_device_name(0) if self.dev == "cuda" else "CPU"
         print(f"[gsr] model={os.path.basename(path)} dev={self.dev} half={self.half} "
               f"gpu={name} tile={self.tile} batch_px={self.batch_px/1e6:.1f}M "
@@ -532,6 +558,10 @@ class Upscaler:
     #   multiples of 64   89 shapes  1.11x px  worst dim blowup 16x
     #   multiples of 32  207 shapes  1.05x px  worst  8x
     #   this ladder      254 shapes  1.05x px  worst  2x   (p95 1.41x)
+    # Note those are (H,W) counts. MIOpen keys on the FULL tensor shape, so the
+    # batch dimension multiplies them: 254 spatial x the batch buckets actually
+    # used works out to 617 distinct shapes over 4767 model calls. Still ~2.5x
+    # fewer than the 1555 unbucketed, and the warm-up is front-loaded.
     DIM_LADDER = (8, 16, 24, 32, 40, 48, 56, 64,
                   96, 128, 160, 192, 224, 256,
                   320, 384, 448, 512, 576, 640)
@@ -573,6 +603,8 @@ class Upscaler:
         with torch.inference_mode():
             x = t.to(self.dev)
             x, orig = self._pad_to_bucket(x)
+            if self.channels_last:
+                x = x.contiguous(memory_format=torch.channels_last)
             y = self.md(x.half() if self.half else x.float())
             if self.half and not torch.isfinite(y).all():
                 # Content-dependent FP16 overflow the load-time probe missed.
@@ -735,13 +767,30 @@ class Upscaler:
         ok = [i for i, (m, _) in enumerate(agg) if m <= best_mae + self.fidelity_margin]
         return min(ok, key=lambda i: abs(agg[i][1] - 1.0))
 
+    def _needs_prescale(self, srcs, plain):
+        """Is the expensive prescaled pass worth running for this image?
+
+        Prescaling exists to repair GEOMETRY the model rewrites when features fall
+        below its noise floor — a square ring coming out circular. If the plain
+        result already retains the source's structure there is nothing to repair,
+        and the detail injection covers the remaining texture. Since that pass is
+        ~80% of GPU time, skipping it when it cannot help is the biggest available
+        saving that does not trade away quality."""
+        w = [s.shape[0] * s.shape[1] for s in srcs]
+        ret = float(np.average([self._score(s, o)[1] for s, o in zip(srcs, plain)],
+                               weights=w))
+        if ret >= self.shortcut_ret:
+            self.shortcut += 1
+            return False
+        return True
+
     def up_many(self, arrs):
         """Upscale a whole image's cells to exactly 4x, preserving fine structure.
 
         Every decision below is made once for the whole call — which is one image
         — so all of a sheet's frames are treated identically."""
         cands = [self._model_4x(arrs, 1)]
-        if self.prescale > 1:
+        if self.prescale > 1 and self._needs_prescale(arrs, cands[0]):
             cands.append(self._model_4x(arrs, self.prescale))
         k = self._pick(arrs, cands) if len(cands) > 1 else 0
         self.picked[k] += 1
@@ -939,6 +988,9 @@ def main():
     ap.add_argument("--only", default="", help="substring filter on rel path")
     ap.add_argument("--no-pack", action="store_true", help="fill cache but skip hd.dat")
     ap.add_argument("--samples", default="", help="also dump before/after PNGs here")
+    ap.add_argument("--shard", default="",
+                    help="i/N — process only every Nth image, for parallel workers. "
+                         "The cache is one file per asset, so shards never collide.")
     ap.add_argument("--max-new", type=int, default=0,
                     help="stop after processing N uncached images (0=all). Lets a wrapper "
                          "restart the process for a fresh GPU context — mitigates the "
@@ -955,6 +1007,9 @@ def main():
                     continue
                 todo.append(rel)
     todo.sort()
+    if args.shard:
+        i, n = (int(x) for x in args.shard.split("/"))
+        todo = todo[i::n]
     if args.limit:
         todo = todo[:args.limit]
     print(f"[gsr] assets={E}  images={len(todo)}  model={MODEL_NAME}", flush=True)
@@ -1013,6 +1068,7 @@ def main():
     print(f"[gsr] processed {done} ({skipped} left-vanilla) in {dt:.0f}s{rf}", flush=True)
     if up and sum(up.picked):
         pl, pr = up.picked
+        print(f"[gsr] prescale skipped as unnecessary on {up.shortcut} images", flush=True)
         print(f"[gsr] candidate chosen per image: plain={pl} prescaled={pr} "
               f"({100 * pr / max(pl + pr, 1):.0f}% prescaled)", flush=True)
 

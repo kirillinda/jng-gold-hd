@@ -25,6 +25,20 @@
 #               so an APU's integrated graphics is never used).
 #   GSR_CHUNK   if set, process at most this many new images per container run
 #               (each chunk gets a fresh HIP context; not needed normally).
+#   GSR_WORKERS parallel shards over the asset list (default 6). The cache is one
+#               file per asset so shards never collide. Full-build sweep from an
+#               empty cache: 3 workers 226s (62% GPU busy), 4 -> 188s (74%),
+#               6 -> 164s (86%), 8 -> 175s (contention). Set 1 to serialise.
+#
+# MIOpen runs in FAST find mode: kernels are chosen by heuristic instead of by
+# benchmarking candidates on-device per tensor shape. Measured on identical
+# 40-image work, fresh process each: hybrid find ~95s (even WITH a tuned user db
+# present - the find results don't survive process restart in this MIOpen build),
+# FAST 10.8-12.5s. The heuristic kernels cost nothing measurable at steady state
+# here, and FAST needs no persistent database, so cold and warm builds are now
+# the same speed. tools/gsr/.miopen is still mounted (git-ignored): FAST will use
+# any find-db entries that do exist, and it keeps MIOpen's lockfiles out of /tmp.
+# Override with GSR_FIND_MODE (1=normal, 3=hybrid, 5=dynamic-hybrid) to re-tune.
 #
 # Detail preservation (see the block comment in build_hd_gsr.py — these exist
 # because the model, being trained to remove noise, was erasing 2-4px rivets,
@@ -52,8 +66,9 @@
 #   GSR_BATCH_PX  input pixels per forward pass (default: sized from free VRAM).
 #                 Mostly matters for sheets with many same-sized frames, which
 #                 then go through in one batch. Backs off automatically on OOM.
-#   GSR_BUCKET    1 (default) — round every model input up to one of ~250 fixed
-#                 shapes so MIOpen stops re-selecting kernels for each new sprite
+#   GSR_BUCKET    1 (default) — round every model input up to a fixed ladder of
+#                 shapes (254 spatial; 617 counting the batch dim, vs 1555
+#                 unbucketed) so MIOpen stops re-selecting kernels per sprite
 #                 size. Measured on 24 forwards of equal total pixels: same shape
 #                 0.042s each, all-different shapes 1.263s each — a 30x penalty
 #                 for shape churn alone. Costs ~5% wasted pixels on padding and
@@ -66,6 +81,7 @@ MODEL="${GSR_MODEL:-4x-UltraSharpV2_Lite}"
 IMAGE="${GSR_IMAGE:-jng-gsr:rocm7}"
 HF_REPO="Kim2091/UltraSharpV2"
 GSR_AA="${GSR_AA:-1}"                       # de-jagged sprite silhouettes (potrace)
+GSR_WORKERS="${GSR_WORKERS:-6}"             # parallel shards (see the note above)
 CACHE="$REPO/upscaled_gsr/$MODEL$([ "$GSR_AA" = 1 ] && echo _aa)"
 
 log(){ printf '\n\033[1;35m[gsr] %s\033[0m\n' "$*"; }
@@ -85,13 +101,17 @@ fi
 # 2. Assets unpacked? --------------------------------------------------------
 [ -n "$(ls -A "$REPO/assets/DATA" 2>/dev/null)" ] || die "assets/ empty — run tools/extract.py first"
 
+# MIOpen scratch (user db + lockfiles). With FAST find (see header) no state is
+# required here — kernels are picked heuristically — but the dir keeps whatever
+# MIOpen does write out of the container's ephemeral /tmp.
+mkdir -p "$GSR_DIR/.miopen"
+
 # 3. Build the image ---------------------------------------------------------
 log "Building $IMAGE (ROCm 7.x + PyTorch + spandrel)"
 docker build -t "$IMAGE" "$GSR_DIR"
 
 # --device kfd/dri exposes the GPU to ROCm; the process must be in the host's
 # render/video groups (pass numeric GIDs — the names don't exist in the image).
-# MIOpen db -> /tmp (its permission-fixup fails on a bind mount).
 RENDER_GID="$(getent group render | cut -d: -f3)"; VIDEO_GID="$(getent group video | cut -d: -f3)"
 
 # Pin the workload to the discrete GPU. /dev/dri exposes every render node, so a
@@ -119,14 +139,16 @@ run_worker(){   # extra args -> build_hd_gsr.py
     -v "$REPO":/work -w /work \
     -e GSR_MODEL="$MODEL" -e GSR_AA="$GSR_AA" ${GSR_TILE:+-e GSR_TILE="$GSR_TILE"} \
     ${GSR_BATCH_PX:+-e GSR_BATCH_PX="$GSR_BATCH_PX"} ${GSR_PAD:+-e GSR_PAD="$GSR_PAD"} \
-    ${GSR_BUCKET:+-e GSR_BUCKET="$GSR_BUCKET"} \
+    ${GSR_BUCKET:+-e GSR_BUCKET="$GSR_BUCKET"} ${GSR_DEJAG_ALPHAMAX:+-e GSR_DEJAG_ALPHAMAX="$GSR_DEJAG_ALPHAMAX"} \
     ${GSR_PRESCALE:+-e GSR_PRESCALE="$GSR_PRESCALE"} \
     ${GSR_INJECT:+-e GSR_INJECT="$GSR_INJECT"} \
     ${GSR_ENSEMBLE:+-e GSR_ENSEMBLE="$GSR_ENSEMBLE"} \
     ${GSR_FIDELITY_MARGIN:+-e GSR_FIDELITY_MARGIN="$GSR_FIDELITY_MARGIN"} \
     ${GSR_FP32:+-e GSR_FP32="$GSR_FP32"} \
     -e HIP_VISIBLE_DEVICES="$GSR_GPU" \
-    -e MIOPEN_USER_DB_PATH=/tmp/miopen -e MIOPEN_CUSTOM_CACHE_DIR=/tmp/miopen \
+    -e MIOPEN_USER_DB_PATH=/work/tools/gsr/.miopen \
+    -e MIOPEN_CUSTOM_CACHE_DIR=/work/tools/gsr/.miopen \
+    -e MIOPEN_FIND_MODE="${GSR_FIND_MODE:-2}" \
     "$IMAGE" python tools/gsr/build_hd_gsr.py "$@"
 }
 
@@ -142,8 +164,19 @@ if [ -n "${GSR_CHUNK:-}" ]; then           # opt-in: fresh context per chunk
     prev="$c"; run_worker --no-pack --max-new "$GSR_CHUNK" || log "chunk crashed — resuming"
   done
 else                                        # default: one pass (re-run to resume)
-  log "Upscaling on the GPU (model=$MODEL, $total images)"
-  run_worker --no-pack
+  log "Upscaling on the GPU (model=$MODEL, $total images, $GSR_WORKERS worker(s))"
+  if [ "$GSR_WORKERS" -gt 1 ]; then
+    # The cache is one file per asset, so shards never collide and a crashed
+    # worker just leaves its share uncached for the next run to pick up.
+    pids=()
+    for i in $(seq 0 $((GSR_WORKERS - 1))); do
+      run_worker --no-pack --shard "$i/$GSR_WORKERS" & pids+=($!)
+    done
+    ok=1; for p in "${pids[@]}"; do wait "$p" || ok=0; done
+    [ "$ok" = 1 ] || log "a worker exited non-zero — re-run to resume from cache"
+  else
+    run_worker --no-pack
+  fi
 fi
 
 c="$(count)"
