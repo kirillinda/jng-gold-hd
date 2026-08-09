@@ -82,7 +82,9 @@ IMAGE="${GSR_IMAGE:-jng-gsr:rocm7}"
 HF_REPO="Kim2091/UltraSharpV2"
 GSR_AA="${GSR_AA:-1}"                       # de-jagged sprite silhouettes (potrace)
 GSR_WORKERS="${GSR_WORKERS:-6}"             # parallel shards (see the note above)
-CACHE="$REPO/upscaled_gsr/$MODEL$([ "$GSR_AA" = 1 ] && echo _aa)"
+# NB: the `|| :` matters — under `set -e` a failing $(...) in an assignment kills
+# the script, so plain `[ ... ] && echo` made every GSR_AA=0 run die silently.
+CACHE="$REPO/upscaled_gsr/$MODEL$([ "$GSR_AA" = 1 ] && echo _aa || :)"
 
 log(){ printf '\n\033[1;35m[gsr] %s\033[0m\n' "$*"; }
 die(){ printf '\033[1;31m[gsr] error: %s\033[0m\n' "$*" >&2; exit 1; }

@@ -2,7 +2,10 @@
 
 A mod for the **Steam build of Jets'n'Guns Gold (v1.308 ST)** — **Linux and Windows** — that:
 
-- adds **true 16:9 widescreen** (Hor+ — you see more to the sides, HUD stays correct), and
+- adds **true 16:9 widescreen** (Hor+ — you see more to the sides, HUD stays correct),
+  with the game's engine *and* all 81 levels' spawn tables re-authored for the wider
+  screen — so enemies enter from off-screen, activate on time, and nothing vanishes
+  mid-air the way the raw resolution change makes them, and
 - renders every sprite, texture and effect from **4× AI-upscaled art** at the correct
   on-screen size, so the 20-year-old graphics look crisp on a modern display.
 
@@ -38,6 +41,10 @@ certainly already have):
 
 Your GPU needs a normal, up-to-date graphics driver (that's all "Vulkan" requires — no extra
 downloads). Any AMD/NVIDIA/Intel card from the last decade works.
+
+> On **Linux** the default HD backend (GSR) additionally wants **Docker** and an **AMD GPU
+> with ROCm** — the whole ML toolchain lives inside a container, nothing touches your host.
+> No ROCm? `HD_BACKEND=ncnn ./build.sh` uses the Vulkan upscaler instead, like Windows does.
 
 ### Install the tools
 
@@ -78,7 +85,10 @@ change any system settings. If you downloaded the ZIP instead of using Git, skip
 and `cd` into the unzipped folder.)*
 
 The first build takes a few minutes — it downloads the AI upscaler and model, unpacks your
-game's art, upscales ~1,900 images on your GPU, and packs everything.
+game's art, upscales ~1,900 images on your GPU, and packs everything. (On Linux with the
+default GSR backend the whole thing — container build, model download, upscale, pack —
+measures **under 3 minutes** from absolute zero on an RX 7900 XTX; results are cached, so
+rebuilds after an art edit take seconds.)
 
 ### Linux
 
@@ -91,7 +101,7 @@ The build produces two folders under `dist/`:
 
 | Folder | What it is |
 | --- | --- |
-| `dist/mod-dropin/` | **Only the changed files** — the patched game binary, `hd.dat`, `Data.ini` + an installer. Copy into your game folder for a drop-in install. |
+| `dist/mod-dropin/` | **Only the changed files** — the patched game binary, `hd.dat` (HD art), `ws.dat` (widescreen level fixes), `Data.ini`, `Game.cfg` + an installer. Copy into your game folder for a drop-in install. |
 | `dist/patched-game/` | A **complete, ready-to-run** copy of the patched game. |
 
 Install the drop-in:
@@ -116,21 +126,31 @@ launch the game from Steam as usual.
 
 ### Choosing the upscale model
 
+**Linux (default GSR backend)** — the model is a `GSR_*` environment knob:
+
+```bash
+./build.sh                                    # default: 4x-UltraSharpV2_Lite
+GSR_MODEL=4x-UltraSharpV2 ./build.sh          # full DAT2 variant (see note below)
+HD_BACKEND=ncnn ./build.sh 4x_NMKD-Siax_200k  # legacy Vulkan/ncnn path, any
+                                              # model in tools/upscaler/models/
+```
+
+The **Lite model is the default on merit, not as a compromise**: an A/B run of the full
+DAT2 UltraSharpV2 over the same assets scored marginally better on pixel-error metrics but
+traced visibly *blockier* on this hand-placed pixel art, and ran ~9× slower. `tools/gsr/lab.py`
+reproduces that comparison side by side with scores.
+
+**Windows** — `build.ps1` uses the Vulkan/ncnn backend (no Docker/ROCm required):
+
 ```powershell
 .\build.ps1                          # default: 4x_NMKD-Siax_200k (sharp, detailed)
 .\build.ps1 -Model realesrgan-x4plus # any model present in tools/upscaler/models/
 ```
 
-```bash
-./build.sh                      # default: 4x_NMKD-Siax_200k
-./build.sh realesrgan-x4plus    # any model present in tools/upscaler/models/
-```
-
-If you pass a model name, it must already be in `tools/upscaler/models/` as a
-`NAME.param` + `NAME.bin` pair (grab more from
-[openmodeldb.info](https://openmodeldb.info) or the
-[Upscayl models](https://github.com/upscayl/custom-models)). With no argument, the default
-model is downloaded automatically. Results are cached per-model, so switching is cheap.
+ncnn models must be in `tools/upscaler/models/` as a `NAME.param` + `NAME.bin` pair (grab
+more from [openmodeldb.info](https://openmodeldb.info) or the
+[Upscayl models](https://github.com/upscayl/custom-models)); the default is downloaded
+automatically. Results are cached per-model, so switching is cheap.
 
 ---
 
@@ -330,11 +350,22 @@ sides carry the same bias, but the absolute numbers understate small sprites.
   tile 2048/512/256 on the same large art) — the numbers are recorded in `run.sh` so the
   trap isn't re-sprung.
 
+- **The whole build is fast enough to iterate on.** A cold build — container image, model
+  download, all ~1,900 images, pack — measures **2 m 44 s** on an RX 7900 XTX, with the GPU
+  ~86% busy. The wins, in order: `MIOPEN_FIND_MODE=FAST` (MIOpen's exhaustive per-shape
+  kernel search ran candidate kernels *on the GPU* between images — 95 s → 12.5 s for the
+  same work), 6 sharded worker processes over the asset list, the shape bucketing above,
+  and a rewritten `.dat` packer (numpy-vectorised XOR obfuscation ~26×, thread-pooled LZO)
+  that produces **byte-identical archives ~10× faster**. Negative results are recorded in
+  `run.sh` so the traps aren't re-sprung: bigger tiles, `cudnn.benchmark` and
+  `channels_last` all made it *slower*.
+
 Build it (the default path in `build.sh`), or run it directly:
 
 ```bash
 GSR_MODEL=4x-UltraSharpV2_Lite tools/gsr/run.sh     # crisp + fast (default)
-GSR_MODEL=4x-UltraSharpV2      tools/gsr/run.sh     # DAT2, max quality, slower
+GSR_MODEL=4x-UltraSharpV2      tools/gsr/run.sh     # full DAT2 — ~9x slower and traces
+                                                    # blockier on this art; see lab.py
 GSR_AA=0                       tools/gsr/run.sh     # hard 1-bit edges (no de-jag)
 ```
 
