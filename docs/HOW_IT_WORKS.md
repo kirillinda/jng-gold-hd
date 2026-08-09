@@ -346,6 +346,44 @@ than invoking it per image (which re-initializes Vulkan and reloads the 64 MB mo
 ~200s for all ~1800 model-eligible images vs. ~40 min. Everything is cached per model under
 `upscaled/<model>/`, so changing models or editing a few assets only reprocesses what changed.
 
+### 8a. The GSR backend: what the engine forces, and what it permits
+
+The default backend ([`tools/gsr/`](../tools/gsr/)) swaps ncnn for a GAN model in a ROCm
+container. Two of its design choices are dictated by the engine internals above rather than by
+image quality, so they belong here.
+
+**The color-key loop preserves alpha.** The tail of `CRXTexture::Load` is:
+
+```asm
+80c0260:  mov    (%ecx,%eax,4),%edx     ; RGBA pixel
+80c0263:  and    $0xffffff,%edx         ; mask the alpha byte OUT of the comparison
+80c0269:  cmp    %edx,%edi              ; %edi = the color key passed into Load()
+80c026b:  jne    .next
+80c026d:  movl   $0x0,(%ecx,%eax,4)     ; exact match -> fully transparent
+```
+
+It rewrites **only** exact key matches and never touches any other pixel's alpha, and the
+surface it operates on has already been through `SDL_ConvertSurface` to a 32-bit RGBA format
+(masks `0xff`/`0xff00`/`0xff0000`/`0xff000000` are built on the stack just before the call).
+So the engine will honour a real alpha channel from *any* container SDL2 can load. That is what
+makes the anti-aliased-silhouette mode (`GSR_AA=1`) possible at all.
+
+**Container choice.** RGBA sprites were originally written as 32-bit TGA even when the archive
+path ended in `.bmp`, relying on the `IMG_LoadTGA_RW` fallback described above. That works, but
+it means none of the shipped art opens in an image editor. They are now written as genuine
+32-bit BMPs with a **`BITMAPV4HEADER`** (`biCompression = BI_BITFIELDS`, explicit R/G/B/A masks,
+`LCS_sRGB`). This keeps the Windows constraint satisfied — BMP is decoded by SDL2 core, so
+unlike PNG it needs no dynamically-opened helper library — while making the files ordinary
+images. Pillow only writes a bare 40-byte `BITMAPINFOHEADER` with no alpha mask, so the header
+is emitted directly; [`tools/gsr/verify_sdl_bmp.py`](../tools/gsr/verify_sdl_bmp.py) drives the
+real `libSDL2` through `ctypes` to confirm the alpha survives byte-for-byte.
+
+**Sheet layout has two syntaxes.** §2's defs declare animation grids as
+`frames_wh = N, cols, rows`, but 141 bitmaps instead use a bare `frames = N, -1, -1`, which is a
+horizontal strip of `N` frames on the same `w // N` integer grid. Reading only the first form
+left every walking/dying character sheet to be upscaled as a single image, smearing detail
+across frame borders.
+
 ---
 
 ## 9. Windows vs. Linux

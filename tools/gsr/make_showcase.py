@@ -234,6 +234,84 @@ for rel, name in EDGES:
 stack(rows_out).save(os.path.join(OUT, "edge-dejag.png"), optimize=True)
 print("wrote edge-dejag.png")
 
-for f in ("upscale-detail.png", "upscale-comparison.png", "edge-dejag.png"):
+
+# --------------------------------------------------------------------------- #
+# Figure 4 — current state across asset TYPES.
+# The other figures all show ships. The pipeline behaves very differently by
+# asset class (a 1024px level background and a 10px-wide walking sprite are not
+# the same problem), so this is the honest "what does the whole set look like
+# now" view: one row per category, before/after at 1:1.
+# --------------------------------------------------------------------------- #
+def wide_text(draw, s, f):
+    return draw.textbbox((0, 0), s, font=f)[2]
+
+
+def gpanel(img, label, sub):
+    f, f2 = font(15), font(12, False)
+    m = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    w = max(img.width, wide_text(m, label, f) + 12, wide_text(m, sub, f2) + 12)
+    p = Image.new("RGB", (w, img.height + 44), PAPER)
+    p.paste(img, ((w - img.width) // 2, 0))
+    d = ImageDraw.Draw(p)
+    d.text(((w - wide_text(m, label, f)) // 2, img.height + 6), label, font=f, fill=INK)
+    d.text(((w - wide_text(m, sub, f2)) // 2, img.height + 25), sub, font=f2, fill=DIM)
+    return p
+
+
+def grow(panels, title, note):
+    ft, fn = font(17), font(12, False)
+    m = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    tw = wide_text(m, title, ft)
+    head = tw + 12 + wide_text(m, note, fn)
+    body = sum(p.width for p in panels) + GAP * (len(panels) - 1)
+    w = max(body, head) + PAD * 2
+    out = Image.new("RGB", (w, max(p.height for p in panels) + 34 + PAD * 2), PAPER)
+    d = ImageDraw.Draw(out)
+    d.text((PAD, PAD - 2), title, font=ft, fill=INK)
+    d.text((PAD + tw + 12, PAD + 2), note, font=fn, fill=DIM)
+    x = (w - body) // 2
+    for p in panels:
+        out.paste(p, (x, PAD + 34)); x += p.width + GAP
+    return out
+
+
+# (title, asset, zoom, crop-or-None). Zoom is NEAREST on the 4x output, so even
+# the magnified panels are real output pixels.
+TYPES = [
+    ("Player ship", "DATA/enemy_gold/roger/roger.bmp", 1, (44, 12, 132, 100)),
+    ("Boss armour", "DATA/enemy/ground.goliath/goliath.bmp", 1, (60, 0, 132, 100)),
+    ("Baked-in lettering", "DATA/enemy/water/bigsub.bmp", 1, None),
+    ("Level background", "DATA/level/level_cannon/gfx/19_main.bmp", 1, (140, 140, 150, 110)),
+    ("UI icon", "DATA/gui/sideex.bmp", 2, None),
+    ("Character sprite", "DATA/enemy/man.space/walk.bmp", 4, None),
+    ("Pickup", "DATA/enemy/special.bonus/hp100.bmp", 3, None),
+]
+rows_out = []
+for title, rel, zoom, crop in TYPES:
+    o = source(rel)
+    fr, cols, rows = frame0(o, rel)
+    up = upscaled(AA_CACHE, rel)
+    ufr, _, _ = frame0(up, rel)
+    before = flatten(fr.resize((fr.width * SCALE, fr.height * SCALE), Image.NEAREST))
+    after = flatten(ufr)
+    if crop:
+        cx, cy, cw, ch = crop
+        cw, ch = min(cw, fr.width - cx), min(ch, fr.height - cy)
+        b = (cx * SCALE, cy * SCALE, (cx + cw) * SCALE, (cy + ch) * SCALE)
+        before, after = before.crop(b), after.crop(b)
+        note = f"{cw}x{ch} source region at 1:1"
+    else:
+        note = f"whole frame at 1:1 ({fr.width}x{fr.height} source)"
+    if zoom > 1:
+        before = before.resize((before.width * zoom, before.height * zoom), Image.NEAREST)
+        after = after.resize((after.width * zoom, after.height * zoom), Image.NEAREST)
+        note += f", shown {zoom}x (nearest)"
+    rows_out.append(grow([gpanel(before, "original", f"{SCALE}x nearest"),
+                          gpanel(after, "this mod", f"{SCALE}x GSR")], title, note))
+stack(rows_out).save(os.path.join(OUT, "asset-gallery.png"), optimize=True)
+print("wrote asset-gallery.png")
+
+for f in ("upscale-detail.png", "upscale-comparison.png", "edge-dejag.png",
+          "asset-gallery.png"):
     p = os.path.join(OUT, f)
     print(f"  {f}: {Image.open(p).size}  {os.path.getsize(p)/1024:.0f} KB")

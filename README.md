@@ -14,6 +14,10 @@ It is delivered as a **non-destructive overlay** plus a tiny binary patch — th
 *Left: the original art at 4× nearest-neighbour, i.e. what a naive blow-up looks like.
 Right: this mod. Both are one frame of a sprite sheet, shown at 1:1 with the 4× output.*
 
+The game's art is not one kind of thing — a 1024 px level backdrop and a 10 px-wide walking
+sprite are different problems — so see **[the current-state gallery](#what-every-asset-type-looks-like-now)**
+for one before/after per asset category.
+
 > ⚠️ You must own Jets'n'Guns Gold. This repo contains **only tooling and docs** — it builds
 > everything from your own copy of the game and never redistributes the game's files or art
 > (© Rake in Grass). Shared **non-commercially with the developers' blessing**; do not sell it
@@ -161,9 +165,12 @@ tools/
     Dockerfile           ROCm 7.x + PyTorch + spandrel image (self-contained)
     build_hd_gsr.py      sheet-aware GAN upscaler -> build/hd.dat
     run.sh               build the image + run the upscale in the container
+    lab.py               A/B any upscaler settings side by side, with scores
     verify_hd.py         check hd.dat: valid archive, every image exactly 4x
     scan_quality.py      check hd.dat for upscale corruption (alpha-aware)
-    make_showcase.py     regenerate the before/after figures in docs/images/
+    scan_detail.py       rank the archive by how much fine structure survived
+    verify_sdl_bmp.py    prove our 32-bit BMPs load with alpha in the real SDL2
+    make_showcase.py     regenerate the before/after + asset-gallery figures
     models/              GAN model weights (git-ignored; fetched from HuggingFace)
   patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
   patch_widescreen.py    binary-patch the leftover hardcoded 800x600 gameplay bounds (ELF)
@@ -190,6 +197,14 @@ magenta `255,0,255` background as the transparent key for sprites), then re-run 
 only changed files are re-upscaled and repacked. `assets/` is git-ignored, so your edits stay
 local and the game's copyrighted art is never committed.
 
+The **upscaled** art is also editable. It lands in `upscaled_gsr/<model>_aa/` and every file
+is a genuine image in the container its extension claims: anti-aliased sprites are 32-bit
+BMPs with a `BITMAPV4HEADER` alpha mask, so they open in GIMP, Krita or a plain image viewer.
+(Earlier builds wrote TGA bytes to `.bmp` paths — the engine accepted that, because
+`CRXTexture::Load` falls back to `IMG_LoadTGA_RW` when SDL2 can't sniff the format, but no
+image viewer would open them.) `tools/gsr/verify_sdl_bmp.py` drives the real libSDL2 through
+`ctypes` to confirm the alpha survives the exact load path the game uses.
+
 ---
 
 ## HD art backend (GSR — the default)
@@ -208,13 +223,69 @@ pixel grid but invents no detail; the GAN reconstructs plausible surface texture
 grain on the Goliath's armour, the machined bevel around Roger's emblem, corrosion on the
 submarine hull.*
 
-- **Animation sheets are split per frame.** A sprite sheet's `frames_wh = N, cols, rows`
-  is read from the game's own defs; each frame is cut out on the exact `w // cols` grid the
-  engine samples, upscaled alone, and reassembled — so detail never smears across frame
-  borders. The 5×7 `hero_faces.jpg` avatar grid is split the same way.
+### What every asset type looks like now
+
+The pipeline behaves very differently by asset class, so this is the honest whole-set view
+rather than a flattering pick: one row per category, original 4× nearest against what ships
+today, all at 1:1 (the small ones magnified with nearest-neighbour, so they are still real
+output pixels).
+
+![Current state by asset type](docs/images/asset-gallery.png)
+
+Measured across the archive with `tools/gsr/scan_detail.py` — fine-structure retention,
+where 1.0 means the source's small detail survived the upscale:
+
+| | before this work | now |
+|---|---|---|
+| median retention | 0.908 | **0.972** |
+| assets losing >30% of their fine structure | 143 | **35** |
+| assets losing >50% | 23 | **9** |
+
+One caveat on that metric: it compares the anti-aliased output against a magenta-keyed
+source, so small sprites with a lot of perimeter score artificially low — the hard key edge
+legitimately becomes a soft alpha edge. It is sound as a before/after comparison, since both
+sides carry the same bias, but the absolute numbers understate small sprites.
+
+- **Small structure is preserved, not "denoised" away.** This is the single biggest quality
+  fix in the pipeline, and it exists because the obvious approach visibly fails. UltraSharpV2
+  is trained with a degradation pipeline (JPEG, noise, blur), so it has learned that small
+  high-frequency detail is *noise to remove* before resynthesising a clean surface — and
+  hand-placed 2–4 px game art sits exactly in that band. Left alone the model erased real
+  detail and invented smooth surfaces over it: rivets melted into bubbles, isometric facets
+  went flat, round speckles came out as diagonal gashes, and a square icon ring came out
+  *circular*. Two corrections fix it, and both are applied per image rather than globally:
+
+  - **Scale matching** — each image is NEAREST-upscaled 2× before the model and
+    BOX-downscaled 2× after. That invents nothing (every source pixel becomes an exact 2×2
+    block) but presents a 3 px rivet to the model as a 6 px structure, above the band it
+    learned to destroy. This is what stops geometry being rewritten.
+  - **Detail re-injection** — the source's own fine structure is added back on top of the
+    model's output, at a strength *solved per image* so the result's gradient energy matches
+    the source's. Assets the model already handled get almost none; the ones it flattened get
+    a lot. This restores texture, which scale matching alone does not.
+
+  Both candidates (plain and scale-matched) are generated and the better one is kept for each
+  image, because scale matching is a large win on detailed art but a small loss on smooth
+  glow/flare sprites where there was no fine structure at risk. The choice is made by
+  measurement — no classifier, no per-object models, no seams. `tools/gsr/lab.py` renders any
+  set of settings side by side with scores, and `tools/gsr/scan_detail.py` ranks the whole
+  archive by how much fine structure survived.
+
+  ![Detail preservation](docs/images/detail-preservation.png)
+
+  *Both columns are real pipeline output; "before" is the same code configured the old way.*
+
+- **Animation sheets are split per frame.** Each frame is cut out on the exact `w // cols`
+  grid the engine samples, upscaled alone, and reassembled — so detail never smears across
+  frame borders. The defs declare layout two different ways (`frames_wh = N, cols, rows` and
+  a bare `frames = N, -1, -1` horizontal strip); reading only the first meant 141 sheets —
+  every walking and dying character among them — were being upscaled as one image. The 5×7
+  `hero_faces.jpg` avatar grid is split the same way.
 - **Transparency is preserved** per flavour (magenta color-key, RGBA `.tga`, grayscale
   additive masks), with colour bled under the key so there are no halos, and hard alpha
-  edges scaled faithfully rather than hallucinated.
+  edges scaled faithfully rather than hallucinated. Sprites with a smooth alpha edge ship as
+  **real 32-bit BMPs with a `BITMAPV4HEADER`**, so the alpha mask is stated explicitly and
+  the files open in an ordinary image editor — see *Editing the art yourself*.
 - **Text is not AI'd.** Font/glyph sheets and HUD digits are scaled with LANCZOS (no letter
   warping) but still 4×'d, and the HTML manual is left at 1× (it isn't a game texture).
 - **Sprite edges are de-jagged** (`GSR_AA=1`, on by default). The originals use a 1-bit
@@ -224,6 +295,12 @@ submarine hull.*
   coverage-checked against the source mask and falls back to a faithful LANCZOS edge if the
   trace drifts, so a sprite can never come out stretched or clipped.
 
+  potrace's corner threshold matters more than it sounds: at its default (`alphamax=1.0`) the
+  tracer treats nearly every corner as a curve, which turned the **square** ring in
+  `DATA/gui/sideex.bmp` into a **circle** and its straight stem into an S-bend. It now runs at
+  `0.6`, where genuine right angles survive and an organic silhouette (the zeppelin hull)
+  still traces smooth. Override with `GSR_DEJAG_ALPHAMAX`.
+
   ![Edge de-jagging](docs/images/edge-dejag.png)
 
   *Zoomed 3× with nearest-neighbour, so these are real output pixels. Note that the middle
@@ -231,10 +308,25 @@ submarine hull.*
   silhouette a staircase. Simply blurring that edge would only trade a sharp staircase for a
   soft one; tracing it produces an actual curve.*
 - **FP16 inference** dispatches conv/matmul to the RX 7900 XTX's RDNA3 **WMMA** matrix cores;
-  the default model is attention-free (Flash-Attention isn't a win on gfx1100).
+  the default model is attention-free (Flash-Attention isn't a win on gfx1100). Precision is
+  probed per model at load: `4x-UltraSharpV2`'s attention blocks overflow FP16 and return
+  all-NaN, which the plausibility guard used to quietly paper over by substituting LANCZOS
+  for *every* image — so that model silently did no AI upscaling at all. It now detects the
+  overflow and runs in FP32 instead.
 - **Every output is verified.** A correct 4× result box-downscaled back to source size
   matches it closely; anything implausible is retried and then LANCZOS'd, so no corrupt
   tile can reach the archive. `tools/gsr/scan_quality.py` re-checks the packed `hd.dat`.
+- **Inputs are shape-bucketed.** Every sprite is a different size, so the model used to see
+  a brand-new tensor shape on nearly every call (1555 distinct shapes across the asset set)
+  and MIOpen re-selected kernels each time. Measured on 24 forwards of identical total
+  pixels: same shape **0.042 s** each, all-different shapes **1.263 s** each — a 30× penalty
+  for churn alone. Inputs are now padded up to a fixed ladder of shapes and cropped back —
+  254 distinct `(H,W)`, or 617 counting the batch dimension that MIOpen also keys on, down
+  from 1555 — which costs ~5% wasted pixels and changes output by at most 2/255 (FP16 noise).
+  Once the shapes are warm, throughput rises from ~0.5 to ~5.9 images/sec. Counter-intuitively, *raising*
+  `GSR_TILE` to use more VRAM makes things slower, not faster (300 s vs 68 s vs 35 s for
+  tile 2048/512/256 on the same large art) — the numbers are recorded in `run.sh` so the
+  trap isn't re-sprung.
 
 Build it (the default path in `build.sh`), or run it directly:
 
