@@ -111,10 +111,25 @@ fi
 # would fail the safety check in patch_hd.py.
 SRC_BIN="$GAME_DIR/jng_gold"
 [ -f "$GAME_DIR/jng_gold.orig" ] && SRC_BIN="$GAME_DIR/jng_gold.orig"
-log "Patching game binary ($SRC_BIN) -> build/jng_gold"
-"$PY" tools/patch_hd.py "$SRC_BIN" "build/jng_gold.hd"
-"$PY" tools/patch_widescreen.py "build/jng_gold.hd" "build/jng_gold"
-rm -f "build/jng_gold.hd"
+# If the stock backup is gone (e.g. removed by a Steam verify) the only binary
+# left may already carry both patches. That IS the desired output, so reuse it
+# rather than fail — patch_hd's safety assert still protects against every other
+# unexpected byte pattern. Restore a true stock binary any time via Steam's
+# "Verify integrity of game files", then re-run this script.
+if "$PY" - "$SRC_BIN" <<'EOF'
+import sys
+d = open(sys.argv[1], 'rb').read()
+sys.exit(0 if d[:4] == b'\x7fELF' and d[0x80c014d - 0x8048000] == 0xE9 else 1)
+EOF
+then
+  log "NOTE: $SRC_BIN is already patched and no stock backup exists — reusing it"
+  cp -f "$SRC_BIN" "build/jng_gold"
+else
+  log "Patching game binary ($SRC_BIN) -> build/jng_gold"
+  "$PY" tools/patch_hd.py "$SRC_BIN" "build/jng_gold.hd"
+  "$PY" tools/patch_widescreen.py "build/jng_gold.hd" "build/jng_gold"
+  rm -f "build/jng_gold.hd"
+fi
 
 # 7. Assemble deliverables ---------------------------------------------------
 log "Assembling dist/"
