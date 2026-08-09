@@ -175,6 +175,8 @@ tools/
   patch_hd.py            binary-patch the game (auto-detects Windows PE / Linux ELF)
   patch_widescreen.py    binary-patch the leftover hardcoded 800x600 gameplay bounds (ELF)
   make_widescreen_defs.py  re-author the 800-wide level defs for the target width (ws.dat)
+  scan_levels.py         simulate every spawn chain in every level at 800 vs the target
+                         width; finds the pop-ins / mid-air despawns the sweep fixes
   make_gamecfg.py        generate a widescreen Game.cfg (Linux)
   install.sh / install.ps1      drop-in installer   (Linux / Windows)
   uninstall.sh / uninstall.ps1  drop-in uninstaller (Linux / Windows)
@@ -367,10 +369,18 @@ On a machine with both a discrete GPU and an APU, `/dev/dri` exposes both to the
    More 4:3 assumptions live in the game's **data** — the intro logo landed off-centre, its
    two halves arrived at different times, the intro jets died mid-screen, and every level's
    ambient particles (starfield, rain) spawned in a strip at x=800 instead of the real right
-   edge. `make_widescreen_defs.py` re-authors those defs for the target width into a tiny
-   `ws.dat` overlay (pure data — it applies on Windows too). See
-   [4a](docs/HOW_IT_WORKS.md#4a-the-43-assumptions-the-config-change-does-not-fix)
-   and [4b](docs/HOW_IT_WORKS.md#4b-the-43-assumptions-that-live-in-the-games-data) in the docs.
+   edge. And beyond the intro, **every level's spawn tables** carry the same 800-isms:
+   rear-attackers popped in on-screen instead of entering from off the left edge, enemies
+   staged just past x=800 became visible, starters between 800 and 1067 fired at t=0
+   mid-screen (the shop test range spawned its targets in view), and crossers whose path
+   or despawn timer was tuned to an 800-wide trip vanished mid-air — a third of the way
+   in for the level-1 habitats. `scan_levels.py` simulates every starter → trigger →
+   enemy → behavior chain at 800 and at the target width, and `make_widescreen_defs.py`
+   turns the diffs into fixes (249 re-authored defs), all shipped in a tiny `ws.dat`
+   overlay (pure data — it applies on Windows too). See
+   [4a](docs/HOW_IT_WORKS.md#4a-the-43-assumptions-the-config-change-does-not-fix),
+   [4b](docs/HOW_IT_WORKS.md#4b-the-43-assumptions-that-live-in-the-games-data)
+   and [4c](docs/HOW_IT_WORKS.md#4c-the-43-assumptions-in-every-levels-spawn-tables) in the docs.
 2. **The engine draws every texture 1:1** — one texture pixel = one logical unit — so a
    bigger texture would just draw bigger. The **binary patch** makes each loaded texture
    report its size as ¼ of the real (4×) pixels, so sprites keep their original size and
