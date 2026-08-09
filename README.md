@@ -335,9 +335,14 @@ sides carry the same bias, but the absolute numbers understate small sprites.
   all-NaN, which the plausibility guard used to quietly paper over by substituting LANCZOS
   for *every* image — so that model silently did no AI upscaling at all. It now detects the
   overflow and runs in FP32 instead.
-- **Every output is verified.** A correct 4× result box-downscaled back to source size
-  matches it closely; anything implausible is retried and then LANCZOS'd, so no corrupt
-  tile can reach the archive. `tools/gsr/scan_quality.py` re-checks the packed `hd.dat`.
+- **Every output is verified — globally and per block.** A correct 4× result
+  box-downscaled back to source size matches it closely; anything implausible is retried
+  and then LANCZOS'd. The check runs per 16px block as well as globally, because a
+  localized garbage blob in a large image moves the global mean by ~1/255 — that gap once
+  let "rainbow noise" ship in level tilesets whose deep magenta-key slabs outran the
+  colour bleed's old 24px reach (the bleed now completes with an exact
+  nearest-real-pixel fill, whatever the keyed area's size). `tools/gsr/scan_quality.py`
+  re-checks the packed `hd.dat`.
 - **Inputs are shape-bucketed.** Every sprite is a different size, so the model used to see
   a brand-new tensor shape on nearly every call (1555 distinct shapes across the asset set)
   and MIOpen re-selected kernels each time. Measured on 24 forwards of identical total
