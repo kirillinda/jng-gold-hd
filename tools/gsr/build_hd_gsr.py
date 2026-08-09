@@ -493,6 +493,10 @@ class Upscaler:
         # How much extra low-frequency error (0-255 mae) a candidate may carry
         # before it is rejected regardless of how much structure it preserves.
         self.fidelity_margin = float(os.environ.get("GSR_FIDELITY_MARGIN", "1.5"))
+        # Veto a non-plain candidate whose pixel-scale gradient energy exceeds
+        # the plain one's by this factor: it is resynthesising dither as wiry
+        # crosshatch, which no downscale-based score can see (see _pick).
+        self.hf_excess = float(os.environ.get("GSR_HF_EXCESS", "1.15"))
         self.picked = [0, 0]                          # [plain, prescaled]
         # Skip the prescaled pass when the plain one already kept the structure.
         # Measured: prescale=2 costs ~80% of all GPU time (40 images: 17.9s plain
@@ -815,15 +819,32 @@ class Upscaler:
 
         Scored over all the image's cells at once, not per cell: the cells are
         consecutive animation frames, and switching approach mid-animation would
-        make the texture pop between frames."""
+        make the texture pop between frames.
+
+        One veto runs at OUTPUT resolution, because every downscale-based score
+        is blind there: wiry hatching finer than 4px at output scale averages
+        away in the box-down, so retention/mae judge it identical to a clean
+        result. On heavily dithered art the prescaled pass "preserves structure"
+        by resynthesising the dither as coherent crosshatch scribble all over
+        the sprite (water/bigsub, level tilesets). Measured: those images show
+        the prescaled candidate carrying 1.18-1.29x the plain one's pixel-scale
+        gradient energy, while everything prescale genuinely helps (sideex's
+        square ring, goliath's rivets) sits at 0.88-1.09x. A candidate that far
+        above the plain baseline is inventing texture, not keeping it."""
         agg = []
         w = [s.shape[0] * s.shape[1] for s in srcs]
+        ge4 = []
         for cand in cands:
             sc = [self._score(s, o) for s, o in zip(srcs, cand)]
             agg.append((float(np.average([m for m, _ in sc], weights=w)),
                         float(np.average([r for _, r in sc], weights=w))))
+            ge4.append(float(np.average([grad_energy(o.astype(np.float32))
+                                         for o in cand], weights=w)))
         best_mae = min(m for m, _ in agg)
-        ok = [i for i, (m, _) in enumerate(agg) if m <= best_mae + self.fidelity_margin]
+        ok = [i for i, (m, _) in enumerate(agg)
+              if m <= best_mae + self.fidelity_margin
+              and not (i > 0 and ge4[i] > ge4[0] * self.hf_excess)]
+        ok = ok or [0]
         return min(ok, key=lambda i: abs(agg[i][1] - 1.0))
 
     def _needs_prescale(self, srcs, plain):

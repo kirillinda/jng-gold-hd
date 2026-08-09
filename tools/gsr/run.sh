@@ -147,6 +147,7 @@ run_worker(){   # extra args -> build_hd_gsr.py
     ${GSR_INJECT:+-e GSR_INJECT="$GSR_INJECT"} \
     ${GSR_ENSEMBLE:+-e GSR_ENSEMBLE="$GSR_ENSEMBLE"} \
     ${GSR_FIDELITY_MARGIN:+-e GSR_FIDELITY_MARGIN="$GSR_FIDELITY_MARGIN"} \
+    ${GSR_HF_EXCESS:+-e GSR_HF_EXCESS="$GSR_HF_EXCESS"} \
     ${GSR_FP32:+-e GSR_FP32="$GSR_FP32"} \
     -e HIP_VISIBLE_DEVICES="$GSR_GPU" \
     -e MIOPEN_USER_DB_PATH=/work/tools/gsr/.miopen \
