@@ -187,8 +187,13 @@ async function selectAsset(rel) {
 
   fitZoom();
   const enc = encodeURIComponent(rel);
+  $("#workTitle").textContent =
+    DET.stage > 0 ? `current result — stage ${DET.stage}` : "GSR upscale";
+  $("#generateBtn").textContent =
+    DET.stage > 0 ? "Generate refinement" : "Generate 6 options";
+  $("#undoBtn").disabled = !(DET.stage > 0);
   const jobs = [
-    loadImage("/img/up?rel=" + enc).then(im => {
+    loadImage("/img/work?rel=" + enc + "&t=" + Date.now()).then(im => {
       UP_IMG = im;
       $("#stackUp .imgc").getContext("2d").drawImage(im, 0, 0);
     }),
@@ -206,10 +211,12 @@ async function selectAsset(rel) {
   await Promise.all(jobs);
   redrawMask();
   setParams(DET.params);
-  renderOptions(DET.gen ? DET.gen.options : [], DET.choice);
-  if (DET.gen) {  // put the saved choice (or the first option) up for comparison
-    const opts = DET.gen.options;
-    showCandidate(opts.find(o => o.file === DET.choice) || opts[0]);
+  const gen = DET.gen && !DET.gen.stale ? DET.gen : null;
+  CURBOX = gen ? gen.box : null;
+  renderOptions(gen ? gen.options : [], DET.choice);
+  if (gen) {  // put the saved choice (or the first option) up for comparison
+    showCandidate(gen.options.find(o => o.file === DET.choice) ||
+                  gen.options[0]);
   }
   $("#jobBox").hidden = true;
   renderList();
@@ -217,7 +224,8 @@ async function selectAsset(rel) {
 
 function setBadge(status) {
   const b = $("#assetStatus");
-  b.textContent = status;
+  b.textContent = status +
+    (DET && DET.stage > 0 ? ` · stage ${DET.stage}` : "");
   b.className = "badge st-" + status;
 }
 
@@ -324,7 +332,7 @@ async function ensureBox() {
   if (CURBOX) return;
   try {
     const d = await api("/api/asset?rel=" + encodeURIComponent(REL));
-    CURBOX = d.gen ? d.gen.box : null;
+    CURBOX = d.gen && !d.gen.stale ? d.gen.box : null;
   } catch (e) {}
 }
 
@@ -413,6 +421,16 @@ async function finish(action) {
     if (action === "save") {
       if (!selectedOpt) return;
       await api("/api/choose", {rel: REL, option: selectedOpt});
+      // stay on the asset: the saved result becomes the new base for
+      // further masked refinement passes
+      await refreshAssets();
+      await selectAsset(REL);
+      return;
+    } else if (action === "undo") {
+      await api("/api/undo", {rel: REL});
+      await refreshAssets();
+      await selectAsset(REL);
+      return;
     } else if (action === "gsr") {
       await api("/api/choose", {rel: REL, option: "gsr"});
     } else if (action === "skip") {
@@ -468,6 +486,7 @@ function bindUI() {
   $("#nextBtn").onclick = () => step(1);
   $("#generateBtn").onclick = generate;
   $("#saveBtn").onclick = () => finish("save");
+  $("#undoBtn").onclick = () => finish("undo");
   $("#gsrBtn").onclick = () => finish("gsr");
   $("#skipBtn").onclick = () => finish("skip");
   $("#resetBtn").onclick = () => finish("reset");

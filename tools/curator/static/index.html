@@ -50,7 +50,7 @@
         </div>
       </div>
       <div class="panel">
-        <h2>GSR upscale</h2>
+        <h2 id="workTitle">GSR upscale</h2>
         <div class="stack" id="stackUp">
           <canvas class="imgc"></canvas><canvas class="maskc"></canvas>
         </div>
@@ -110,7 +110,9 @@
     <div id="actions">
       <button id="saveBtn" class="big" disabled
         title="Write the selected candidate as this asset's curated file and move to the next todo asset">Save selected</button>
-      <button id="gsrBtn" title="Keep the plain GSR upscale for this asset (no FLUX) and move on">Use GSR as-is</button>
+      <button id="undoBtn" disabled
+        title="Step back one stage: restores the previous saved result (or the plain GSR upscale at stage 1)">Undo last save</button>
+      <button id="gsrBtn" title="Keep the plain GSR upscale for this asset (no FLUX, discards all stages) and move on">Use GSR as-is</button>
       <button id="skipBtn" title="Defer this asset for later — marked as skipped">Skip</button>
       <button id="resetBtn" title="Forget this asset's choice (deletes its curated file) and mark it todo again">Reset asset</button>
     </div>

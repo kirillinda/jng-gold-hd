@@ -6,10 +6,12 @@
 # Runs inside the ROCm container (see run.sh); torch is only imported by the
 # generation worker thread, so the UI is browsable before the GPU warms up.
 import base64
+import glob
 import io
 import json
 import os
 import queue
+import shutil
 import struct
 import threading
 import time
@@ -126,9 +128,25 @@ def chosen_path(rel):
     return os.path.join(DATA, "chosen", rel)
 
 
+def history_path(rel, stage):
+    return os.path.join(DATA, "history", rel + f".stage{stage}")
+
+
+def clear_history(rel):
+    for f in glob.glob(os.path.join(DATA, "history",
+                                    glob.escape(rel) + ".stage*")):
+        os.remove(f)
+
+
 # ---- imaging ----------------------------------------------------------------
 def load_cache(rel):
     return Image.open(os.path.join(CACHE, rel))
+
+
+def load_work(rel):
+    """Current working image: the last saved stage, or the plain GSR upscale."""
+    p = chosen_path(rel)
+    return Image.open(p if os.path.exists(p) else os.path.join(CACHE, rel))
 
 
 def box16(mask, W, H, pad=48, minside=320):
@@ -227,7 +245,7 @@ def _run_job(job):
         import engine as engine_mod
         ENGINE = engine_mod.Engine()
 
-    im = load_cache(rel).convert("RGBA")
+    im = load_work(rel).convert("RGBA")
     mask_l = Image.open(mask_path(rel)).convert("L")
     box = box16(np.asarray(mask_l), im.width, im.height)
     crop = im.crop(box)
@@ -248,13 +266,14 @@ def _run_job(job):
         families.append(("v3", p["v3_scale"]))
     if not families:
         raise ValueError("both LoRA families are unchecked")
-    JOBS[jid]["total"] = SEEDS_PER_FAMILY * len(families)
+    n_seeds = int(p.get("_n", SEEDS_PER_FAMILY))
+    JOBS[jid]["total"] = n_seeds * len(families)
 
     ENGINE.encode(p["prompt"], log=msg)
     options = []
     for fam, scale in families:
         ENGINE.ensure(fam, scale, log=msg)
-        for k in range(SEEDS_PER_FAMILY):
+        for k in range(n_seeds):
             seed = int(p["seed"]) + k
             msg(f"{fam} ×{scale} · seed {seed} · "
                 f"{crop.width}×{crop.height}px · {p['steps']} steps")
@@ -273,6 +292,7 @@ def _run_job(job):
             # progressive, so an option can be chosen mid-batch
             _save_json(os.path.join(gd, "meta.json"),
                        {"box": list(map(int, box)), "params": p,
+                        "base_stage": int(p.get("_stage", 0)),
                         "options": options})
     msg("done")
 
@@ -327,7 +347,8 @@ def api_asset(rel: str):
     check_rel(rel)
     im = load_cache(rel)
     ent = state_get(rel)
-    d = {"rel": rel, "w": im.width, "h": im.height,
+    stage = ent.get("stage", 0)
+    d = {"rel": rel, "w": im.width, "h": im.height, "stage": stage,
          "status": ent.get("status", "todo"), "choice": ent.get("choice"),
          "params": {**DEFAULTS, **ent.get("params", {})},
          "has_mask": os.path.exists(mask_path(rel)), "gen": None}
@@ -335,6 +356,7 @@ def api_asset(rel: str):
     if os.path.exists(meta_p):
         with open(meta_p) as f:
             d["gen"] = json.load(f)
+        d["gen"]["stale"] = d["gen"].get("base_stage", 0) != stage
     return d
 
 
@@ -351,12 +373,24 @@ def api_mask(body: MaskIn):
 def api_generate(body: GenerateIn):
     check_rel(body.rel)
     api_mask(body)
+    ent = state_get(body.rel)
+    stage = ent.get("stage", 0)
+    gens = ent.get("gens", 0)
     p = {**DEFAULTS, **body.params}
-    state_update(body.rel, params=p)
+    state_update(body.rel, params=p, gens=gens + 1)
+    run_p = dict(p)
+    run_p["_stage"] = stage
+    if stage > 0:
+        # refinement pass: one sample per checked family, and roll the seed
+        # each press so repeated generates give new samples, not the same one
+        run_p["_n"] = 1
+        run_p["seed"] = int(p["seed"]) + gens
+    else:
+        run_p["_n"] = SEEDS_PER_FAMILY
     jid = uuid.uuid4().hex[:12]
     JOBS[jid] = {"status": "queued", "done": 0, "total": 0,
                  "message": "queued", "options": [], "rel": body.rel}
-    JOB_Q.put({"id": jid, "rel": body.rel, "params": p})
+    JOB_Q.put({"id": jid, "rel": body.rel, "params": run_p})
     return {"job": jid}
 
 
@@ -370,28 +404,61 @@ def api_job(id: str):
 @app.post("/api/choose")
 def api_choose(body: ChooseIn):
     rel = check_rel(body.rel)
+    ent = state_get(rel)
+    stage = ent.get("stage", 0)
     if body.option == "gsr":
         cp = chosen_path(rel)
         if os.path.exists(cp):
             os.remove(cp)
-        state_update(rel, status="gsr", choice="gsr")
-        return {"ok": True}
+        clear_history(rel)
+        state_update(rel, status="gsr", choice="gsr", stage=0)
+        return {"ok": True, "stage": 0}
     gd = gen_dir(rel)
     with open(os.path.join(gd, "meta.json")) as f:
         meta = json.load(f)
+    if meta.get("base_stage", 0) != stage:
+        raise HTTPException(409, "these options were generated against a "
+                            "previous stage — generate again first")
     opt = next((o for o in meta["options"] if o["file"] == body.option), None)
     if opt is None:
         raise HTTPException(404, f"option {body.option!r} not in last batch")
-    im = load_cache(rel).convert("RGBA")
+    im = load_work(rel).convert("RGBA")
     box = tuple(meta["box"])
     flux = Image.open(os.path.join(gd, opt["raw"])).convert("RGB")
     mask_l = Image.open(os.path.join(gd, "mask.png")).convert("L").crop(box)
     blended = composite_crop(im.crop(box), flux, mask_l,
                              meta["params"]["feather"])
     im.paste(blended, box)
-    save_like_cache(rel, im, chosen_path(rel))
-    state_update(rel, status="flux", choice=body.option)
-    return {"ok": True}
+    cp = chosen_path(rel)
+    if os.path.exists(cp):  # keep the outgoing stage for undo
+        hp = history_path(rel, stage)
+        _mkdirs(os.path.dirname(hp))
+        shutil.copy2(cp, hp)
+    save_like_cache(rel, im, cp)
+    mp = mask_path(rel)  # the mask is consumed; the next stage starts fresh
+    if os.path.exists(mp):
+        os.remove(mp)
+    state_update(rel, status="flux", choice=body.option, stage=stage + 1)
+    return {"ok": True, "stage": stage + 1}
+
+
+@app.post("/api/undo")
+def api_undo(body: RelIn):
+    rel = check_rel(body.rel)
+    stage = state_get(rel).get("stage", 0)
+    if stage == 0:
+        raise HTTPException(400, "nothing to undo")
+    cp = chosen_path(rel)
+    hp = history_path(rel, stage - 1)
+    if stage > 1 and os.path.exists(hp):
+        shutil.copy2(hp, cp)
+        os.remove(hp)
+        state_update(rel, stage=stage - 1, status="flux", choice=None)
+    else:
+        if os.path.exists(cp):
+            os.remove(cp)
+        state_update(rel, stage=0, status="todo", choice=None)
+    return {"ok": True, "stage": max(0, stage - 1)}
 
 
 @app.post("/api/skip")
@@ -406,7 +473,8 @@ def api_reset(body: RelIn):
     cp = chosen_path(rel)
     if os.path.exists(cp):
         os.remove(cp)
-    state_update(rel, status="todo", choice=None)
+    clear_history(rel)
+    state_update(rel, status="todo", choice=None, stage=0)
     return {"ok": True}
 
 
@@ -430,6 +498,11 @@ def img_orig(rel: str):
 @app.get("/img/up")
 def img_up(rel: str):
     return _png_response(load_cache(check_rel(rel)).convert("RGBA"))
+
+
+@app.get("/img/work")
+def img_work(rel: str):
+    return _png_response(load_work(check_rel(rel)).convert("RGBA"))
 
 
 @app.get("/img/mask")

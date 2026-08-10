@@ -16,14 +16,23 @@ detail the SR model cannot.
    lab-flux test batches), optionally type a prompt (empty = unconditioned),
    press **Generate 6 options** — 3 seeds × ultrasharp-v2 + 3 seeds ×
    ultrasharp-v3 (LoHa, hand-merged).
-4. Click an option to select it (double-click to inspect 1:1; hold the mouse
-   button there to flip to the plain GSR crop). **Save selected** writes the
-   composite; **Use GSR as-is** accepts the plain upscale; **Skip** defers.
-5. Everything persists under `lab-curator/` (gitignored): masks, generated
-   batches, per-asset parameters, choices. Close the browser or kill the
-   server any time; it resumes where you left off.
-6. `tools/curator/apply.sh` overlays `lab-curator/chosen/` onto the cache;
-   rebuild `hd.dat` after that. Re-run apply after any full cache rebuild.
+4. Click an option to select it (the full-size candidate panel shows it
+   composited into the sheet; hold the mouse button there to flip to the
+   current base). **Save selected** writes the composite; **Use GSR as-is**
+   accepts the plain upscale; **Skip** defers.
+5. **Multi-stage refinement**: after a save, the middle panel becomes the
+   saved result (stage 1, 2, …) and you can paint a new mask on it and
+   generate again — refinement passes produce one quick sample per checked
+   family, with the seed rolled on every press so each generate gives a new
+   variation. **Undo last save** steps back one stage (previous stages are
+   kept on disk); options from before a save are marked stale and cannot be
+   accidentally composited onto the newer base.
+6. Everything persists under `lab-curator/` (gitignored): masks, generated
+   batches, per-asset parameters, choices, stage history. Close the browser
+   or kill the server any time; it resumes where you left off.
+7. `tools/curator/apply.sh` overlays `lab-curator/chosen/` (the latest stage
+   of every curated asset) onto the cache; rebuild `hd.dat` after that.
+   Re-run apply after any full cache rebuild.
 
 ## How the masked pass works
 
