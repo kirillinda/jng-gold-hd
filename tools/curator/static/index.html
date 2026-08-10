@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JnG HD curator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>JnG HD curator</h1>
+  <span id="progress"></span>
+  <input id="search" type="search" placeholder="filter assets…">
+  <select id="statusFilter">
+    <option value="">all</option>
+    <option value="todo">todo</option>
+    <option value="flux">flux</option>
+    <option value="gsr">gsr</option>
+    <option value="skip">skipped</option>
+  </select>
+</header>
+
+<div id="main">
+  <aside id="sidebar"><ul id="assetList"></ul></aside>
+
+  <section id="work">
+    <div id="toolbar">
+      <span id="assetName">—</span>
+      <span id="assetStatus" class="badge"></span>
+      <span class="sep"></span>
+      <label>brush <input id="brushSize" type="range" min="4" max="200" value="48">
+        <b id="brushVal">48</b>px</label>
+      <button id="eraserBtn" title="E">erase</button>
+      <button id="clearBtn">clear mask</button>
+      <span class="sep"></span>
+      <label>zoom <input id="zoomSlider" type="range" min="10" max="300" value="100">
+        <b id="zoomVal">100</b>%</label>
+      <button id="fitBtn">fit</button>
+      <span class="sep"></span>
+      <button id="prevBtn" title="[">◀ prev</button>
+      <button id="nextBtn" title="]">next ▶</button>
+    </div>
+
+    <div id="panels">
+      <div class="panel">
+        <h2>original</h2>
+        <div class="stack" id="stackOrig">
+          <canvas class="imgc"></canvas><canvas class="maskc"></canvas>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>GSR upscale</h2>
+        <div class="stack" id="stackUp">
+          <canvas class="imgc"></canvas><canvas class="maskc"></canvas>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside id="right">
+    <h2>parameters</h2>
+    <div id="params">
+      <label>strength <input id="p_strength" type="range" min="0.05" max="0.60"
+        step="0.05" value="0.25"><b>0.25</b></label>
+      <label>steps <input id="p_steps" type="range" min="8" max="48" step="4"
+        value="32"><b>32</b></label>
+      <label>guidance <input id="p_guidance" type="range" min="1" max="7"
+        step="0.5" value="3.5"><b>3.5</b></label>
+      <label>feather <input id="p_feather" type="range" min="0" max="64" step="2"
+        value="12"><b>12</b>px</label>
+      <label>v2 scale <input id="p_v2" type="range" min="0" max="1.5" step="0.1"
+        value="1.0"><b>1.0</b>
+        <input id="c_v2" type="checkbox" checked title="generate v2 options"></label>
+      <label>v3 scale <input id="p_v3" type="range" min="0" max="1.5" step="0.1"
+        value="1.0"><b>1.0</b>
+        <input id="c_v3" type="checkbox" checked title="generate v3 options"></label>
+      <label class="row">seed <input id="p_seed" type="number" value="7"></label>
+      <label class="col">prompt (empty = unconditioned)
+        <textarea id="p_prompt" rows="3" placeholder=""></textarea>
+        <button id="presetBtn" class="mini">use tested prompt</button>
+      </label>
+    </div>
+    <button id="generateBtn" class="big">Generate 6 options</button>
+    <div id="jobBox" hidden>
+      <div id="jobBar"><div id="jobFill"></div></div>
+      <div id="jobMsg"></div>
+    </div>
+
+    <h2>options <span class="hint">(click = select, double-click = inspect)</span></h2>
+    <div id="options"></div>
+
+    <div id="actions">
+      <button id="saveBtn" class="big" disabled>Save selected</button>
+      <button id="gsrBtn">Use GSR as-is</button>
+      <button id="skipBtn">Skip</button>
+      <button id="resetBtn">Reset asset</button>
+    </div>
+  </aside>
+</div>
+
+<div id="lightbox" hidden>
+  <div id="lightboxHint">hold left mouse button to compare with plain GSR — Esc closes</div>
+  <div id="lightboxScroll"><img id="lightboxImg"></div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
