@@ -48,7 +48,11 @@ function renderList() {
 }
 
 // ---- canvases --------------------------------------------------------------
-const stacks = () => [$("#stackOrig"), $("#stackUp")];
+const paintStacks = () => [$("#stackOrig"), $("#stackUp")];
+const allStacks = () => [...paintStacks(), $("#stackCand")];
+let UP_IMG = null;    // decoded GSR sheet, for the candidate panel
+let CURBOX = null;    // crop box of the current generation batch
+let candOpt = null;   // option shown in the candidate panel
 
 function loadImage(src) {
   return new Promise((res, rej) => {
@@ -60,7 +64,7 @@ function loadImage(src) {
 }
 
 function applyZoom() {
-  for (const st of stacks()) {
+  for (const st of allStacks()) {
     st.style.width = (W * ZOOM) + "px";
     st.style.height = (H * ZOOM) + "px";
     for (const c of st.querySelectorAll("canvas")) {
@@ -73,7 +77,7 @@ function applyZoom() {
 }
 
 function fitZoom() {
-  const avail = ($("#panels").clientWidth - 60) / 2;
+  const avail = ($("#panels").clientWidth - 90) / 3;
   const availH = $("#panels").clientHeight - 60;
   ZOOM = Math.min(1, avail / W, availH / H);
   if (ZOOM <= 0 || !isFinite(ZOOM)) ZOOM = 1;
@@ -89,7 +93,7 @@ function redrawMask() {
   t.globalCompositeOperation = "source-in";
   t.fillStyle = "#ff2848";
   t.fillRect(0, 0, W, H);
-  for (const st of stacks()) {
+  for (const st of paintStacks()) {
     const c = st.querySelector(".maskc");
     const x = c.getContext("2d");
     x.clearRect(0, 0, W, H);
@@ -119,7 +123,7 @@ function stroke(x0, y0, x1, y1) {
 }
 
 function bindPainting() {
-  for (const st of stacks()) {
+  for (const st of paintStacks()) {
     const c = st.querySelector(".maskc");
     let last = null;
     c.onpointerdown = e => {
@@ -169,9 +173,14 @@ async function selectAsset(rel) {
 
   $("#assetName").textContent = rel;
   setBadge(DET.status);
-  for (const st of stacks()) {
+  for (const st of allStacks()) {
     for (const c of st.querySelectorAll("canvas")) { c.width = W; c.height = H; }
   }
+  UP_IMG = null;
+  CURBOX = DET.gen ? DET.gen.box : null;
+  candOpt = candObj = candImg = null;
+  candManual = false;
+  $("#candLabel").textContent = "";
   maskCanvas = document.createElement("canvas");
   maskCanvas.width = W; maskCanvas.height = H;
   mctx = maskCanvas.getContext("2d", {willReadFrequently: true});
@@ -179,8 +188,10 @@ async function selectAsset(rel) {
   fitZoom();
   const enc = encodeURIComponent(rel);
   const jobs = [
-    loadImage("/img/up?rel=" + enc).then(im =>
-      $("#stackUp .imgc").getContext("2d").drawImage(im, 0, 0)),
+    loadImage("/img/up?rel=" + enc).then(im => {
+      UP_IMG = im;
+      $("#stackUp .imgc").getContext("2d").drawImage(im, 0, 0);
+    }),
     loadImage("/img/orig?rel=" + enc).then(im => {
       const x = $("#stackOrig .imgc").getContext("2d");
       x.imageSmoothingEnabled = false;
@@ -196,6 +207,10 @@ async function selectAsset(rel) {
   redrawMask();
   setParams(DET.params);
   renderOptions(DET.gen ? DET.gen.options : [], DET.choice);
+  if (DET.gen) {  // put the saved choice (or the first option) up for comparison
+    const opts = DET.gen.options;
+    showCandidate(opts.find(o => o.file === DET.choice) || opts[0]);
+  }
   $("#jobBox").hidden = true;
   renderList();
 }
@@ -247,6 +262,11 @@ async function generate() {
     setJobMsg("queued", false);
     $("#jobFill").style.width = "0";
     renderOptions([], null);
+    CURBOX = null;  // the new batch gets its own crop box
+    candOpt = candObj = candImg = null;
+    candManual = false;
+    $("#candLabel").textContent = "";
+    $("#stackCand .imgc").getContext("2d").clearRect(0, 0, W, H);
     jobTimer = setInterval(poll, 1500);
   } catch (e) {
     setJobMsg(e.message, true);
@@ -275,12 +295,70 @@ async function poll() {
   setJobMsg(j.message, j.status === "error");
   if (j.total) $("#jobFill").style.width = (100 * j.done / j.total) + "%";
   renderOptions(j.options, null);
+  if (!candManual && j.options.length)  // live-preview the newest option
+    showCandidate(j.options[j.options.length - 1]);
   if (j.status === "done" || j.status === "error") {
     clearInterval(jobTimer);
     jobTimer = null;
     jobId = null;
     $("#generateBtn").disabled = false;
   }
+}
+
+// ---- candidate panel -------------------------------------------------------
+let candManual = false;   // user clicked an option; stop auto-previewing
+let candImg = null;       // decoded crop of the shown option, for hold-to-flip
+let candObj = null;
+
+function optUrl(file) {
+  return "/img/gen?rel=" + encodeURIComponent(REL) +
+         "&f=" + encodeURIComponent(file);
+}
+
+async function ensureBox() {
+  if (CURBOX) return;
+  try {
+    const d = await api("/api/asset?rel=" + encodeURIComponent(REL));
+    CURBOX = d.gen ? d.gen.box : null;
+  } catch (e) {}
+}
+
+function drawCandBase(x) {
+  x.clearRect(0, 0, W, H);
+  if (UP_IMG) x.drawImage(UP_IMG, 0, 0);
+}
+
+function redrawCandidate(plain) {
+  const x = $("#stackCand .imgc").getContext("2d");
+  drawCandBase(x);
+  if (!plain && candImg && CURBOX) {
+    x.clearRect(CURBOX[0], CURBOX[1],
+                CURBOX[2] - CURBOX[0], CURBOX[3] - CURBOX[1]);
+    x.drawImage(candImg, CURBOX[0], CURBOX[1]);
+  }
+}
+
+async function showCandidate(o) {
+  if (!o || o.file === candOpt) return;
+  await ensureBox();
+  if (!CURBOX || !UP_IMG) return;
+  const img = await loadImage(optUrl(o.file));
+  candOpt = o.file;
+  candObj = o;
+  candImg = img;
+  $("#candLabel").textContent = "— " + o.label;
+  redrawCandidate(false);
+}
+
+function bindCandidate() {
+  const c = $("#stackCand .imgc");
+  c.style.cursor = "pointer";
+  c.onpointerdown = e => {
+    if (e.button !== 0) return;
+    c.setPointerCapture(e.pointerId);
+    redrawCandidate(true);   // hold = plain GSR
+  };
+  c.onpointerup = c.onpointercancel = () => redrawCandidate(false);
 }
 
 // ---- options ---------------------------------------------------------------
@@ -303,6 +381,8 @@ function renderOptions(options, chosen) {
       $("#saveBtn").disabled = false;
       for (const el of box.children) el.classList.remove("sel");
       div.classList.add("sel");
+      candManual = true;
+      showCandidate(o);
     };
     div.ondblclick = () => openLightbox(o.file);
     box.appendChild(div);
@@ -406,6 +486,7 @@ function bindUI() {
     else if (e.key === "e") $("#eraserBtn").click();
   };
   bindPainting();
+  bindCandidate();
 }
 
 async function init() {
