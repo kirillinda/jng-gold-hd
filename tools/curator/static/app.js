@@ -223,6 +223,11 @@ function setBadge(status) {
 
 // ---- params ----------------------------------------------------------------
 const P = ["strength", "steps", "guidance", "feather"];
+const PARAM_DEFAULTS = {  // mirror of the server's tested-batch defaults
+  strength: 0.25, steps: 32, guidance: 3.5, feather: 12,
+  v2_scale: 1.0, v3_scale: 1.0, use_v2: true, use_v3: true,
+  seed: 7, prompt: "",
+};
 function setParams(p) {
   for (const k of P) {
     $("#p_" + k).value = p[k];
@@ -466,6 +471,7 @@ function bindUI() {
   $("#gsrBtn").onclick = () => finish("gsr");
   $("#skipBtn").onclick = () => finish("skip");
   $("#resetBtn").onclick = () => finish("reset");
+  $("#defaultsBtn").onclick = () => setParams(PARAM_DEFAULTS);
   $("#presetBtn").onclick = () => {
     $("#p_prompt").value = "highly detailed sharp video game art, metal " +
       "surfaces, rivets, grime, crisp texture";
