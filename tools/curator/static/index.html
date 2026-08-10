@@ -27,17 +27,19 @@
       <span id="assetName">—</span>
       <span id="assetStatus" class="badge"></span>
       <span class="sep"></span>
-      <label>brush <input id="brushSize" type="range" min="4" max="200" value="48">
+      <label title="Size of the mask brush, in output-resolution pixels. Paint on either the original or the GSR panel — it's the same mask.">
+        brush <input id="brushSize" type="range" min="4" max="200" value="48">
         <b id="brushVal">48</b>px</label>
-      <button id="eraserBtn" title="E">erase</button>
-      <button id="clearBtn">clear mask</button>
+      <button id="eraserBtn" title="Toggle eraser — strokes remove mask instead of adding it (shortcut: E)">erase</button>
+      <button id="clearBtn" title="Remove the whole mask on this asset">clear mask</button>
       <span class="sep"></span>
-      <label>zoom <input id="zoomSlider" type="range" min="10" max="300" value="100">
+      <label title="Magnification of the three panels — they zoom and scroll together.">
+        zoom <input id="zoomSlider" type="range" min="10" max="300" value="100">
         <b id="zoomVal">100</b>%</label>
-      <button id="fitBtn">fit</button>
+      <button id="fitBtn" title="Fit the whole sheet into view">fit</button>
       <span class="sep"></span>
-      <button id="prevBtn" title="[">◀ prev</button>
-      <button id="nextBtn" title="]">next ▶</button>
+      <button id="prevBtn" title="Previous asset (shortcut: [)">◀ prev</button>
+      <button id="nextBtn" title="Next asset (shortcut: ])">next ▶</button>
     </div>
 
     <div id="panels">
@@ -65,27 +67,36 @@
   <aside id="right">
     <h2>parameters</h2>
     <div id="params">
-      <label>strength <input id="p_strength" type="range" min="0.05" max="0.60"
+      <label title="How much FLUX is allowed to repaint inside the mask. Low = mostly traces the GSR pixels, just cleaning them up; high = paints from imagination. 0.25 stays faithful; from ~0.40 it starts rewriting shapes and text. The most important slider.">
+        strength <input id="p_strength" type="range" min="0.05" max="0.60"
         step="0.05" value="0.25"><b>0.25</b></label>
-      <label>steps <input id="p_steps" type="range" min="8" max="48" step="4"
+      <label title="How long the model works on the image. Fewer = quicker but rougher, more = cleaner but slower; past ~40 the gains are invisible. It only actually works for steps × strength, so at low strength sessions are short anyway.">
+        steps <input id="p_steps" type="range" min="8" max="48" step="4"
         value="32"><b>32</b></label>
-      <label>guidance <input id="p_guidance" type="range" min="1" max="7"
+      <label title="How literally the prompt is obeyed. Higher = more forced and garish, lower = more of the model's own taste. Barely matters when the prompt is empty.">
+        guidance <input id="p_guidance" type="range" min="1" max="7"
         step="0.5" value="3.5"><b>3.5</b></label>
-      <label>feather <input id="p_feather" type="range" min="0" max="64" step="2"
+      <label title="Softness of the mask's edge, in pixels. Small = hard 'sticker' seam; large = wide gradual fade (the outer band of the mask barely changes). Pixels outside the mask are never touched either way.">
+        feather <input id="p_feather" type="range" min="0" max="64" step="2"
         value="12"><b>12</b>px</label>
-      <label>v2 scale <input id="p_v2" type="range" min="0" max="1.5" step="0.1"
+      <label title="Volume knob for the ultrasharp-v2 detail style mixed into the painter. 0 = plain FLUX, 1.0 = as its author trained it, above 1.0 = exaggerated, can get crunchy. Checkbox: include 3 v2 candidates in the batch (unticking halves the wait).">
+        v2 scale <input id="p_v2" type="range" min="0" max="1.5" step="0.1"
         value="1.0"><b>1.0</b>
-        <input id="c_v2" type="checkbox" checked title="generate v2 options"></label>
-      <label>v3 scale <input id="p_v3" type="range" min="0" max="1.5" step="0.1"
+        <input id="c_v2" type="checkbox" checked></label>
+      <label title="Same knob for the ultrasharp-v3 style — a different flavour of extra detail. Checkbox: include 3 v3 candidates in the batch (unticking halves the wait).">
+        v3 scale <input id="p_v3" type="range" min="0" max="1.5" step="0.1"
         value="1.0"><b>1.0</b>
-        <input id="c_v3" type="checkbox" checked title="generate v3 options"></label>
-      <label class="row">seed <input id="p_seed" type="number" value="7"></label>
-      <label class="col">prompt (empty = unconditioned)
+        <input id="c_v3" type="checkbox" checked></label>
+      <label class="row" title="The dice roll. Same seed + same settings = exactly the same result; a different seed = a different variation, not better or worse. The batch already uses seed, seed+1, seed+2 per family — change it only to get six fresh rolls.">
+        seed <input id="p_seed" type="number" value="7"></label>
+      <label class="col" title="Written instructions for what should appear inside the mask. Empty = just enhance what's already there. A few words ('dense green moss, wet metal') nudge it; long prompts mostly add chaos at low strength. It can't protect things — that's the mask's job.">
+        prompt (empty = unconditioned)
         <textarea id="p_prompt" rows="3" placeholder=""></textarea>
         <button id="presetBtn" class="mini">use tested prompt</button>
       </label>
     </div>
-    <button id="generateBtn" class="big">Generate 6 options</button>
+    <button id="generateBtn" class="big"
+      title="Run FLUX only inside the padded crop around your mask: 3 seeds × v2 + 3 seeds × v3. Options appear as they finish; everything outside the mask stays untouched.">Generate 6 options</button>
     <div id="jobBox" hidden>
       <div id="jobBar"><div id="jobFill"></div></div>
       <div id="jobMsg"></div>
@@ -95,10 +106,11 @@
     <div id="options"></div>
 
     <div id="actions">
-      <button id="saveBtn" class="big" disabled>Save selected</button>
-      <button id="gsrBtn">Use GSR as-is</button>
-      <button id="skipBtn">Skip</button>
-      <button id="resetBtn">Reset asset</button>
+      <button id="saveBtn" class="big" disabled
+        title="Write the selected candidate as this asset's curated file and move to the next todo asset">Save selected</button>
+      <button id="gsrBtn" title="Keep the plain GSR upscale for this asset (no FLUX) and move on">Use GSR as-is</button>
+      <button id="skipBtn" title="Defer this asset for later — marked as skipped">Skip</button>
+      <button id="resetBtn" title="Forget this asset's choice (deletes its curated file) and mark it todo again">Reset asset</button>
     </div>
   </aside>
 </div>
