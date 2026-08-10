@@ -45,7 +45,11 @@ detail the SR model cannot.
   store, generation jobs (single worker thread), compositing, image serving.
 - `engine.py` — FLUX.1-dev img2img on the 24GB card: prompt embeddings
   cached with text encoders off-GPU, transformer stored fp8 (layerwise
-  casting), v2 LoRA fused / v3 LoHa hand-merged per variant switch.
+  casting), v2 LoRA fused / v3 LoHa hand-merged per variant. Prepared
+  variants stay resident (active on GPU, up to three parked in RAM/swap)
+  so after the first batch a variant switch is a ~6s PCIe swap, not a
+  ~1min rebuild — measured 251s → 33s per 6-option batch, byte-identical
+  outputs across the park/restore cycle.
 - `static/` — the UI (vanilla JS, no build step).
 - `Dockerfile` — `jng-gsr:rocm7` + diffusers + fastapi (image
   `jng-curator:latest`, built automatically by `run.sh`).

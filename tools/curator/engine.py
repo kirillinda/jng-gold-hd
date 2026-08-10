@@ -93,32 +93,50 @@ def _merge_loha(tr, scale, log):
 
 
 class Engine:
+    # Prepared (fused/merged + fp8-cast) transformers are kept resident: the
+    # active one on the GPU, the others parked in system RAM, swapped over
+    # PCIe in seconds instead of a ~1min rebuild from disk. ~12GB per parked
+    # variant; the box has 46GB + a large swap, so three variants (e.g. two
+    # scales of one family) stay warm. The text encoders (~10GB) are loaded
+    # lazily and dropped during first-time builds so the transient bf16 load
+    # (~24GB) doesn't stack on top of everything at once.
+    MAX_CACHE = 3
+
     def __init__(self):
         from diffusers import FluxImg2ImgPipeline
         self.pipe = FluxImg2ImgPipeline.from_pretrained(
-            FLUX, transformer=None, torch_dtype=torch.bfloat16)
+            FLUX, transformer=None, text_encoder=None, text_encoder_2=None,
+            torch_dtype=torch.bfloat16)
         self.pipe.vae.enable_tiling()
         self.pipe.vae.to("cuda")
-        # Keep the text encoders OFF the pipe: diffusers derives its execution
-        # device from registered components, and CPU-parked encoders would drag
-        # latent prep onto the CPU while the VAE sits on CUDA. They are
-        # reattached only for the duration of encode().
-        self._te = self.pipe.text_encoder
-        self._te2 = self.pipe.text_encoder_2
-        self.pipe.text_encoder = self.pipe.text_encoder_2 = None
+        # Text encoders stay OFF the pipe except while encoding: diffusers
+        # derives its execution device from registered components, and
+        # CPU-parked encoders would drag latent prep onto the CPU.
+        self._te = self._te2 = None
         self._embeds = {}
-        self.variant = None  # (family, scale) currently fused into the weights
+        self._cache = {}     # (family, scale) -> prepared transformer
+        self.variant = None  # key of the variant currently on the GPU
+
+    def _park(self):
+        tr = self.pipe.transformer
+        if tr is not None:
+            tr.to("cpu")
+            self.pipe.transformer = None
+        self.variant = None
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def encode(self, prompt, log=print):
         if prompt in self._embeds:
             return self._embeds[prompt]
-        # Drop the transformer rather than shuffle an fp8-cast module between
-        # devices; prompts change rarely, transformer reloads are routine.
-        if self.pipe.transformer is not None:
-            self.pipe.transformer = None
-            self.variant = None
-            gc.collect()
-            torch.cuda.empty_cache()
+        self._park()
+        if self._te is None:
+            log("loading text encoders")
+            from transformers import CLIPTextModel, T5EncoderModel
+            self._te = CLIPTextModel.from_pretrained(
+                FLUX, subfolder="text_encoder", torch_dtype=torch.bfloat16)
+            self._te2 = T5EncoderModel.from_pretrained(
+                FLUX, subfolder="text_encoder_2", torch_dtype=torch.bfloat16)
         log("encoding prompt")
         p = self.pipe
         p.text_encoder, p.text_encoder_2 = self._te, self._te2
@@ -140,26 +158,39 @@ class Engine:
         want = (family, round(float(scale), 3))
         if self.variant == want:
             return
-        from diffusers import FluxTransformer2DModel
-        if self.pipe.transformer is not None:
-            self.pipe.transformer = None
-            gc.collect()
-            torch.cuda.empty_cache()
-        log(f"loading transformer ({family} ×{scale})")
-        tr = FluxTransformer2DModel.from_pretrained(
-            FLUX, subfolder="transformer", torch_dtype=torch.bfloat16)
-        self.pipe.transformer = tr
-        if scale > 0:
-            if family == "v2":
-                self.pipe.load_lora_weights(LORA_V2)
-                self.pipe.fuse_lora(lora_scale=float(scale))
-                self.pipe.unload_lora_weights()
-                log(f"v2 LoRA fused (scale {scale})")
-            elif family == "v3":
-                _merge_loha(tr, float(scale), log)
-        tr.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn,
-                                    compute_dtype=torch.bfloat16)
+        self._park()
+        tr = self._cache.pop(want, None)
+        if tr is None:
+            # RAM guard: fresh bf16 load (~24GB) + parked variant (~12GB) +
+            # text encoders (~10GB) would exceed this box. Prompt embeddings
+            # stay cached, so the encoders are rarely needed again.
+            if self._cache and self._te is not None:
+                self._te = self._te2 = None
+                gc.collect()
+            while len(self._cache) >= self.MAX_CACHE:
+                self._cache.pop(next(iter(self._cache)))
+                gc.collect()
+            from diffusers import FluxTransformer2DModel
+            log(f"building transformer ({family} ×{scale}) — first use, "
+                "about a minute")
+            tr = FluxTransformer2DModel.from_pretrained(
+                FLUX, subfolder="transformer", torch_dtype=torch.bfloat16)
+            self.pipe.transformer = tr
+            if scale > 0:
+                if family == "v2":
+                    self.pipe.load_lora_weights(LORA_V2)
+                    self.pipe.fuse_lora(lora_scale=float(scale))
+                    self.pipe.unload_lora_weights()
+                    log(f"v2 LoRA fused (scale {scale})")
+                elif family == "v3":
+                    _merge_loha(tr, float(scale), log)
+            tr.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn,
+                                        compute_dtype=torch.bfloat16)
+        else:
+            log(f"swapping in cached transformer ({family} ×{scale})")
+            self.pipe.transformer = tr
         tr.to("cuda")
+        self._cache[want] = tr  # re-insert = most recently used
         self.variant = want
 
     def generate(self, image, prompt, strength, steps, guidance, seed):
